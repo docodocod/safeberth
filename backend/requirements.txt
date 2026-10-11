@@ -14,3 +14,6 @@ apscheduler==3.10.2
 pytest==8.3.0
 pytest-asyncio==0.24.0
 paho-mqtt>=2.0,<3
+langgraph==1.2.14
+langchain-core==1.6.9
+langchain-openai==1.7.0
