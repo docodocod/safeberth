@@ -138,7 +138,7 @@ async def test_same_wharf_clear_makes_no_finding(monkeypatch):
     assert box.findings == {} and "없습니다" in out
 
 
-def _patch_upcoming(monkeypatch, arrivals, risk):
+def _patch_upcoming(monkeypatch, arrivals, risk, baseline=RiskLevel.SAFE):
     seen = {}
 
     async def fake_who(db, neo4j, *, wharf):
@@ -150,7 +150,8 @@ def _patch_upcoming(monkeypatch, arrivals, risk):
 
     async def fake_verdict(db, neo4j, req):
         seen.setdefault("pairs", []).append([a.cargo.chem_id for a in req.adjacent_cargos])
-        return SimpleNamespace(risk_level=risk)
+        # 이웃 없이(기준선) 물으면 대상 배 자체의 등급, 입항 예정선 화물을 넣어 물으면 risk
+        return SimpleNamespace(risk_level=baseline if not req.adjacent_cargos else risk)
 
     monkeypatch.setattr(judgment_tools, "who_is_at", fake_who)
     monkeypatch.setattr(tb, "_fetch_upcoming_arrivals", fake_arrivals)
@@ -223,3 +224,21 @@ async def test_finding_ids_are_sequential_across_tools(monkeypatch):
     await _tool(box, "선석", "same_wharf_status").ainvoke({})
     await _tool(box, "혼재", "upcoming_neighbor_conflicts").ainvoke({})
     assert list(box.findings) == ["F1", "F2"]
+
+
+@pytest.mark.asyncio
+async def test_risk_already_present_without_the_arrival_is_not_blamed_on_it(monkeypatch):
+    # 최종 검토 Important 3 — 대상 배 자체가 이미 '주의'(같은 배 화물끼리 충돌 등)면, 입항 예정선을 넣어도 같은 '주의'는
+    # 그 배 때문이 아니다. 발견을 만들면 조건 문장이 엉뚱한 배를 가리킨다.
+    _patch_upcoming(monkeypatch, [_arrival()], RiskLevel.CAUTION, baseline=RiskLevel.CAUTION)
+    box = _box()
+    out = await _tool(box, "혼재", "upcoming_neighbor_conflicts").ainvoke({})
+    assert box.findings == {} and "자체 등급" in out
+
+
+@pytest.mark.asyncio
+async def test_arrival_that_raises_risk_above_the_vessels_own_level_is_a_finding(monkeypatch):
+    _patch_upcoming(monkeypatch, [_arrival()], RiskLevel.DANGER, baseline=RiskLevel.CAUTION)
+    box = _box()
+    await _tool(box, "혼재", "upcoming_neighbor_conflicts").ainvoke({})
+    assert box.findings["F1"].supports == "주의"

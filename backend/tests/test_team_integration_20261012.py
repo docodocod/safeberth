@@ -78,7 +78,8 @@ def _patch(monkeypatch, weather_status=WorkStatus.NORMAL, *, blocked_rows=(), ar
         return list(arrivals)
 
     async def fake_verdict(db, neo4j, req):
-        return SimpleNamespace(risk_level=risk)
+        # 이웃 없이(기준선) 물으면 대상 배 자체는 '안전', 입항 예정선 화물을 넣어 물으면 risk
+        return SimpleNamespace(risk_level=risk if req.adjacent_cargos else RiskLevel.SAFE)
 
     for name, fn in (("check_berth", fake_berth), ("check_weather", fake_weather),
                      ("check_segregation", fake_segregation), ("suggest_alternatives", fake_alternatives)):

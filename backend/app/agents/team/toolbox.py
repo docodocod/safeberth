@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import tools as judgment_tools
 from app.agents.orchestrator.schemas import OrchestratorRequest
-from app.agents.safety.schemas import AdjacentCargo, CargoRef, RiskLevel, SafetyAssessmentRequest
+from app.agents.safety.schemas import AdjacentCargo, CargoRef, RiskLevel, SafetyAssessmentRequest, risk_level_rank
 from app.agents.safety.service import assess_verdict
 from app.models.assessment_history import GATE_BLOCKING_LEVELS, AssessmentStage
 
@@ -220,6 +220,10 @@ class Toolbox:
                     self._db, wharfs=wharfs, now=self._now, until=req.window_end,
                     exclude_call_sign=req.vessel.call_sign,
                 )
+                # [2026-10-12 최종 검토] 기준선 — 이웃 없이 본 이 배 자체의 등급. assess_verdict 의 등급은 배 단위라 같은 배
+                #   화물끼리 충돌·포장 부적합까지 들어 있다. 입항 예정선을 넣어도 이 기준선보다 높아지지 않으면 그 배 때문이
+                #   아니다 — 그런데도 발견을 만들면 조건 문장이 엉뚱한 배를 가리킨다. 화물이 매칭된 예정선이 있을 때만 잰다.
+                baseline: RiskLevel | None = None
                 for a in arrivals:
                     when = _kst(a["arrival_at_utc"])
                     cargo = "·".join(a["cargo_names"]) or "화물명 없음"
@@ -235,6 +239,16 @@ class Toolbox:
                     ))
                     if verdict.risk_level is RiskLevel.SAFE:
                         notes.append(f"{head} — 혼재 규칙 '안전'")
+                        continue
+                    if baseline is None:
+                        baseline = (await assess_verdict(self._db, self._neo4j, SafetyAssessmentRequest(
+                            target_cargo=req.cargo, target_cargos=req.cargos, adjacent_cargos=[],
+                        ))).risk_level
+                    if risk_level_rank(verdict.risk_level) <= risk_level_rank(baseline):
+                        notes.append(
+                            f"{head} — 혼재 규칙 '{verdict.risk_level.value}' 이지만 이 배 자체 등급('{baseline.value}')과 같아 "
+                            f"입항 예정선 때문이 아님"
+                        )
                         continue
                     found.append(self._add(
                         kind="UPCOMING_NEIGHBOR_CONFLICT", tense="예정",
