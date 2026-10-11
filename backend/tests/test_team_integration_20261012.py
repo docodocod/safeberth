@@ -241,3 +241,27 @@ async def test_unknown_floor_is_never_sent_to_the_agent(monkeypatch):
     team, model = _team([_submit("적합")])
     result = await _orchestrate(team)
     assert model.cursor == 1 and _axis(result, "기상").floor_level is None and result.level == "판정불가"
+
+
+@pytest.mark.asyncio
+async def test_expected_finding_at_the_same_wharf_cannot_raise(monkeypatch):
+    # 최종 검토 Important 4 — 같은 부두(효성부두) 입항 예정 발견은 부두 검사를 통과하므로, 시점(tense) 검사만이 상향을 막는다
+    same_wharf_arrival = [{**_ARRIVAL[0], "wharf_name": "효성부두"}]
+    _patch(monkeypatch, arrivals=same_wharf_arrival)
+    team, _ = _team([_submit("적합"), _submit("적합"),
+                     tool_call("upcoming_neighbor_conflicts", {}), _submit("주의", "같은 부두 입항 예정선", ["F1"])])
+    result = await _orchestrate(team)
+    seg = _axis(result, "혼재")
+    assert seg.level == "적합" and seg.evidence_refs == [] and result.level == "적합"
+
+
+def test_present_finding_with_condition_text_never_becomes_a_condition():
+    # 최종 검토 Important 4 — 조건은 '예정' 발견만. 조건 문장이 있어도 '현재' 발견이면 조건으로 쓰지 않는다
+    from app.agents.team.findings import Finding
+    from app.agents.team.specialist import AxisVerdict
+    from app.agents.team.team import _conditions
+
+    present = Finding(id="F1", kind="SAME_WHARF_BLOCKED", tense="현재", supports="주의",
+                      wharf_name="효성부두", condition_text="이 문장은 조건이 되면 안 된다")
+    verdict = AxisVerdict(level="적합", reasoning="x", condition_refs=["F1"])
+    assert _conditions(verdict, {"F1": present}, _request()) == []
