@@ -25,6 +25,8 @@ from neo4j import AsyncDriver
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import tools  # noqa: F401 - 테스트가 service.tools 를 바꿔친다(graph.py 와 같은 모듈 객체)
+from app.agents.team.levels import apply_team_level, team_conditions
+from app.agents.team.team import Team
 from app.llm.base import LLMClient
 from app.models.assessment_history import AssessmentLevel
 from app.services.assessment import level_from_decision
@@ -60,8 +62,10 @@ async def _finish(
     """
     result.target_source = request.target_source
     level, headline = level_from_decision(result)
-    result.level = level.value
-    result.headline = headline
+    # [2026-10-12] 에이전트 팀이 하한 위로 올린 축('주의'까지)과 팀이 붙인 조건을 반영한다(문서 5장).
+    # 아래 `level is not AssessmentLevel.UNKNOWN` 검사는 규칙 등급 기준 그대로다 — 팀은 판정불가를 풀지 못한다.
+    result.level, result.headline = apply_team_level(level.value, headline, result.opinions)
+    result.conditions += [c for c in team_conditions(result.opinions) if c not in result.conditions]
     result.needs_check = list(dict.fromkeys(m for o in result.opinions for m in o.missing))
     summary = ""
     if llm_client is not None and level is not AssessmentLevel.UNKNOWN:
@@ -86,6 +90,7 @@ async def orchestrate(
     request: OrchestratorRequest,
     *,
     summarize: bool = True,
+    team: Team | None = None,
 ) -> OrchestratorResult:
     """summarize=False 면 종합 문장을 템플릿으로 쓴다(안전 서술 LLM 은 그대로 부른다).
 
@@ -95,7 +100,7 @@ async def orchestrate(
     종합 문장은 규칙 결과(근거·확인 필요)만 보므로 서술을 기다릴 필요가 없다 — 두 호출이 차례로 약 6초였다.
     """
     pending: list[Awaitable[None]] = []
-    result = await _judge(db, neo4j_driver, llm_client, request, defer=pending)
+    result = await _judge(db, neo4j_driver, llm_client, request, defer=pending, team=team)
     result, *_ = await asyncio.gather(_finish(result, request, llm_client if summarize else None), *pending)
     return result
 
@@ -107,11 +112,12 @@ async def _judge(
     request: OrchestratorRequest,
     *,
     defer: list[Awaitable[None]] | None = None,
+    team: Team | None = None,
 ) -> OrchestratorResult:
     """판정 본체 — 종합 문장(summary)은 비워 두고 _finish 가 채운다. defer 는 assess_safety 참고.
 
     [2026-10-11] 선석 → 기상 → 혼재 사슬은 graph.py 의 LangGraph 로 옮겼다(동작 불변).
     """
-    graph = build_judge_graph(db, neo4j_driver, llm_client, defer)
+    graph = build_judge_graph(db, neo4j_driver, llm_client, defer, team)
     final = await graph.ainvoke({"request": request})
     return final["result"]

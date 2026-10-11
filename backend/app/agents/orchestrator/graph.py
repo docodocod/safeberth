@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents import tools
 from app.agents.safety.schemas import RiskLevel
 from app.agents.scheduling.schemas import BerthCandidate, OccupancyStatus
+from app.agents.team.team import Team
 from app.agents.weather.schemas import WeatherAssessmentResult, WorkStatus
 from app.llm.base import LLMClient
 
@@ -100,7 +101,12 @@ def build_judge_graph(
     neo4j_driver: AsyncDriver,
     llm_client: LLMClient,
     defer: list[Awaitable[None]] | None,
+    team: Team | None = None,
 ):
+    async def _decided(opinion: tools.Opinion, request: OrchestratorRequest) -> tools.Opinion:
+        # [2026-10-12] 규칙 도구가 낸 의견은 하한이다. 팀이 있으면 전문 에이전트가 조사해 그 위에서 판정한다(문서 5장).
+        return opinion if team is None else await team.decide(opinion, request)
+
     async def _alternatives(request: OrchestratorRequest) -> tools.Alternatives:
         # 배정이 아니라 제안이다(회의 §3 조치안). 지금 선석은 뺀다.
         return await tools.suggest_alternatives(
@@ -135,7 +141,7 @@ def build_judge_graph(
             window_end=request.window_end,
             draught_margin_m=request.draught_margin_m,
         )
-        opinions = [*state["opinions"], tools.berth_opinion(berth_check)]
+        opinions = [*state["opinions"], await _decided(tools.berth_opinion(berth_check), request)]
         candidate = berth_check.candidate
         if candidate is None:
             # 판정할 시설이 **실제로** 안 맞는 경우에만 대체안을 찾는다(회의 §3 조치안).
@@ -188,7 +194,7 @@ def build_judge_graph(
             berth_group=candidate.berth_group,
             as_of=request.weather_as_of,
         )
-        opinions = [*state["opinions"], tools.weather_opinion(berth_weather)]
+        opinions = [*state["opinions"], await _decided(tools.weather_opinion(berth_weather), request)]
         update: JudgeState = {"opinions": opinions, "berth_weather": berth_weather}
         if berth_weather.status is WorkStatus.NORMAL:
             return update
@@ -229,7 +235,7 @@ def build_judge_graph(
             call_sign=request.vessel.call_sign,
             defer=defer,
         )
-        opinions = [*state["opinions"], tools.segregation_opinion(safety_result)]
+        opinions = [*state["opinions"], await _decided(tools.segregation_opinion(safety_result), request)]
 
         if safety_result.risk_level != RiskLevel.BLOCKED:
             # ── 교차 확인 ───────────────────────────────────────────────────
