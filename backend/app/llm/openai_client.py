@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 # 업스트림은 HTTP 200을 주는데 구조화 출력만 비어 오는 간헐적 현상이라, 같은 요청을 그대로 다시 보내면
 # 대부분 성공한다(같은 프롬프트를 인프로세스로 12회 돌렸을 때는 0회 실패).
 #
-# 예외(네트워크·레이트리밋)와 파싱 실패를 **같이** 재시도한다. ChatOpenAI 의 자체 재시도(max_retries)는
-# 예외만 다루므로 0 으로 두고 이 루프 하나로 합친다 — 두 겹이면 시도 횟수가 곱해진다.
+# 예외(네트워크·레이트리밋)와 파싱 실패를 **같이** 재시도한다. SDK 자체 재시도(기본 2회, Retry-After 존중)는
+# 그대로 둔다 — 이식 전에도 이 두 층이 함께 동작했고, 끄면 429 버스트에서 이전보다 빨리 502 가 난다
+# (2026-10-11 최종 검토에서 지적, max_retries=0 으로 껐던 것을 되돌렸다).
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 0.5
 
@@ -31,7 +32,7 @@ _BACKOFF_BASE_SECONDS = 0.5
 class OpenAiClient(LLMClient):
     def __init__(self, *, api_key: str, model: str) -> None:
         # use_responses_api: 기존 구현(responses.parse)과 같은 API 를 유지해 응답 동작이 달라지지 않게 한다.
-        self._chat = ChatOpenAI(model=model, api_key=api_key, max_retries=0, use_responses_api=True)
+        self._chat = ChatOpenAI(model=model, api_key=api_key, use_responses_api=True)
 
     def chat_model(self) -> ChatOpenAI:
         """도구를 바인딩해 쓰는 에이전트용 모델 객체(계획 2)."""

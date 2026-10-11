@@ -134,3 +134,12 @@ async def test_gives_up_after_three_attempts(monkeypatch):
 def test_chat_model_is_exposed_for_agents():
     client = openai_client.OpenAiClient(api_key="sk-test", model="gpt-4.1-mini")
     assert client.chat_model() is client._chat
+
+
+def test_sdk_transient_error_retries_are_kept():
+    # 이식 전 AsyncOpenAI 는 SDK 기본 재시도(2회, Retry-After 존중)를 썼다. 0 으로 끄면 429 버스트에서
+    # 이전보다 훨씬 빨리 502 가 난다 — 바깥 3회 루프는 파싱 실패까지 같이 다루는 별도 층이다.
+    from openai import AsyncOpenAI
+
+    client = openai_client.OpenAiClient(api_key="sk-test", model="gpt-4.1-mini")
+    assert client._chat.root_async_client.max_retries == AsyncOpenAI(api_key="sk-test").max_retries
