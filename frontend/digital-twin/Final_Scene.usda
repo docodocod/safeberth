@@ -1,0 +1,661 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def "Environment"
+    {
+        def DistantLight "Sun"
+        {
+            float inputs:angle = 0.53
+            color3f inputs:color = (1, 0.9, 0.8)
+            float inputs:intensity = 3000
+            float3 xformOp:rotateXYZ = (-45, 45, 0)
+            uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+        }
+
+        def DomeLight "Sky"
+        {
+            float inputs:intensity = 500
+        }
+
+        def Cube "Ocean"
+        {
+            color3f[] primvars:displayColor = [(0.05, 0.15, 0.3)]
+            float3 xformOp:scale = (10000, 0.1, 10000)
+            double3 xformOp:translate = (0, -0.1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def "Berths"
+        {
+            def Cube "OTK_Terminal"
+            {
+                color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]
+                float3 xformOp:scale = (800, 10, 200)
+                double3 xformOp:translate = (-2000, 5, -1500)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Jeongil_Terminal"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.9)]
+                float3 xformOp:scale = (800, 10, 200)
+                double3 xformOp:translate = (0, 5, -1800)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "SK_Energy_Terminal"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.4, 0.4)]
+                float3 xformOp:scale = (800, 10, 200)
+                double3 xformOp:translate = (2000, 5, -1200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "S_OIL_Terminal"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.4)]
+                float3 xformOp:scale = (800, 10, 200)
+                double3 xformOp:translate = (4000, 5, -1000)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+        }
+    }
+
+    def "Vessels"
+    {
+        def Xform "V_1"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (1740.0000000492355, 0, -1741.2793104170987)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.3, 0.6, 0.8)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_2"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (1990.0000000490081, 0, -2000.8593595488123)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.2, 0.8, 0.2)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_3"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (1990.0000000404816, 0, -1991.3705521762636)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.2, 0.8, 0.2)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_4"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (2465.0000000491445, 0, -2458.478246127882)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.3, 0.6, 0.8)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_5"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (2595.0000000449336, 0, -2605.487560916941)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.3, 0.6, 0.8)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_6"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (3020.0000000505156, 0, -3015.8519126814554)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.3, 0.6, 0.8)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_7"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (3475.0000000570935, 0, -3483.01878387538)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.3, 0.6, 0.8)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_8"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (3160.00000003811, 0, -3156.498757821069)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.2, 0.8, 0.2)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_9"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (3605.000000044356, 0, -3610.900366007641)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.3, 0.6, 0.8)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        def Xform "V_10"
+        {
+            float3 xformOp:rotateXYZ = (0, 45, 0)
+            double3 xformOp:translate = (3810.000000044056, 0, -3824.0789670460626)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+            def Cube "Hull"
+            {
+                color3f[] primvars:displayColor = [(0.3, 0.6, 0.8)]
+                float3 xformOp:scale = (100, 30, 500)
+                double3 xformOp:translate = (0, 15, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Bridge"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.9, 0.9)]
+                float3 xformOp:scale = (80, 50, 60)
+                double3 xformOp:translate = (0, 70, -200)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_0"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_1"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, 50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_2"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -50)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cylinder "Tank_3"
+            {
+                color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+                float3 xformOp:rotateXYZ = (90, 0, 0)
+                float3 xformOp:scale = (35, 35, 35)
+                double3 xformOp:translate = (0, 45, -150)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+    }
+}
+

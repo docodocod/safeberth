@@ -1,0 +1,15 @@
+import { chromium } from 'playwright';
+import { pathToFileURL } from 'node:url';
+import path from 'path';
+import { fileURLToPath } from 'node:url';
+const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const BASE = path.dirname(ROOT);
+const b = await chromium.launch();
+const p = await (await b.newContext({ deviceScaleFactor: 2 })).newPage();
+await p.goto(pathToFileURL(path.join(BASE, 'scratch_build', 'quality_check.html')).href);
+await p.waitForTimeout(600);
+const el = p.locator('.card');
+await el.screenshot({ path: path.join(BASE, '보고서_시각자료', '16_품질검사_14항목.png') });
+await el.screenshot({ path: path.join(BASE, '보고서_시각자료', '16_품질검사_14항목.jpg'), type: 'jpeg', quality: 85 });
+console.log('16 saved');
+await b.close();

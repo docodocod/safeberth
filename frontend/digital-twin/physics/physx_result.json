@@ -1,0 +1,24 @@
+{
+  "input": {
+    "dwt": 20000.0,
+    "wind": 17.0,
+    "wave": 1.0,
+    "berth_speed": 0.15,
+    "no_physx": false
+  },
+  "quasi_static_mooring": {
+    "line_tension_kn": 137.58751490994953,
+    "mbl_kn": 588.0,
+    "tension_pct": 23.399237229583253
+  },
+  "quasi_static_berthing": {
+    "energy_kj": 546.75,
+    "fender_capacity_kj": 512.4966150526035,
+    "ratio_pct": 106.68363145069371,
+    "safe_speed_ms": 0.14522532727171628
+  },
+  "physx": {
+    "physx_max_line_tension_kn": 146.826421875,
+    "physx_fender_energy_kj": 303.7664814735651
+  }
+}
