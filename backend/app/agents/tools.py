@@ -65,6 +65,24 @@ class Opinion(BaseModel):
         default_factory=list,
         description="[2026-09-29] 참고 — 판정에 쓰지 않은 값(외해 파고 등). '확인한 것' 칩에 두면 확인한 근거처럼 읽혔다",
     )
+    # [2026-10-12] 에이전트 팀(app/agents/team) 필드 — 팀이 꺼져 있으면 전부 기본값이다.
+    floor_level: str | None = Field(
+        default=None,
+        description="팀이 이 축을 판정했다면 규칙 엔진이 계산한 하한 등급. `level` 은 이 값 이상이다(내릴 수 없다)",
+    )
+    rationale: str = Field(default="", description="전문 에이전트가 제출한 판정 이유")
+    consulted_tools: list[str] = Field(
+        default_factory=list, description="전문 에이전트가 판정 전에 부른 조회 도구 이름(부른 순서)",
+    )
+    evidence_refs: list[str] = Field(
+        default_factory=list, description="등급 상향의 근거로 받아들여진 발견 id(이 부두의 '현재' 발견만)",
+    )
+    conditions: list[str] = Field(
+        default_factory=list, description="에이전트가 '예정' 발견을 근거로 붙인 조건(문장은 코드가 발견 사실로 만든다)",
+    )
+    clamped: str = Field(
+        default="", description="에이전트의 판정을 규칙으로 보정했다면 그 이유(보정하지 않았으면 빈 문자열)",
+    )
 
 
 class BerthCheck(BaseModel):
