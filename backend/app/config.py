@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     # 프로세스가 둘 이상이면 판정이 중복 기록되므로 끌 수 있게 둔다.
     # ※ 잡이 uvicorn 프로세스 안에서 돌기 때문에 --workers 를 2 이상으로 띄우면
     #   워커 수만큼 중복 실행된다. 운영은 workers 1 로 띄울 것.
+    # [2026-10-12] 에이전트 팀(app/agents/team) — 판정 그래프의 각 축에서 LLM 전문 에이전트가 조회 도구로 조사하고 판정을
+    # 제출한다. 규칙 하한 아래로 못 내리고, 올릴 때는 '현재' 발견이 필요하며 팀 단독으로는 '주의'까지다(문서 5장).
+    # 기본 꺼짐: Critic(계획 3)이 없고 과잉 상향을 실제 데이터로 재 보기 전이다. 켜면 /orchestrator/assess 한 건당
+    # LLM 호출이 축마다 1회 이상 늘어난다.
+    agent_team_enabled: bool = False
     enable_scheduler: bool = True
 
     model_config = SettingsConfigDict(

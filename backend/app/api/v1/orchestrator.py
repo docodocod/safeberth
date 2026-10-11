@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator.schemas import OrchestratorRequest, OrchestratorResult
 from app.agents.orchestrator.service import orchestrate
+from app.agents.team.factory import build_team
 from app.core.deps import get_llm_client, get_session
 from app.core.exceptions import (
     LLMGenerationError,
@@ -71,7 +72,7 @@ _RESPONSES: dict = {
 
 
 async def _orchestrate_or_http(
-    db: AsyncSession, llm_client: LLMClient, request: OrchestratorRequest,
+    db: AsyncSession, llm_client: LLMClient, request: OrchestratorRequest, *, use_team: bool = False,
 ) -> OrchestratorResult:
     # [2026-09-29] 실제 접안 부두로 판정할 때 PORT-MIS 신고 계류시설을 함께 넘긴다 — 둘이 다르면
     # 판정 경로에 신고값이 한 줄 남는다. 콘솔은 신고값을 모르므로 호출부호로 여기서 읽는다.
@@ -80,7 +81,10 @@ async def _orchestrate_or_http(
         if live and live["facility_name"]:
             request = request.model_copy(update={"reported_wharf_name": live["facility_name"]})
     try:
-        return await orchestrate(db, neo4j_client.driver, llm_client, request)
+        # [2026-10-12] 판정만 하고 기록하지 않는 /assess 에서만 에이전트 팀을 쓴다(플래그가 켜진 때). 팀이 올린 등급이
+        # 판정 기록(assessment_history)에 들어가면 게이트 인터락에 영향을 주므로 — 입항 감시 잡도 팀을 쓰지 않는다.
+        team = build_team(db, neo4j_client.driver, llm_client, request) if use_team else None
+        return await orchestrate(db, neo4j_client.driver, llm_client, request, team=team)
     except MsdsNotFoundError as e:
         raise HTTPException(status_code=404, detail=f"MSDS not found for identifier: {e.identifier}")
     except MsdsUpstreamError as e:
@@ -101,7 +105,7 @@ async def assess(
     db: AsyncSession = Depends(get_session),
     llm_client: LLMClient = Depends(get_llm_client),
 ) -> OrchestratorResult:
-    return await _orchestrate_or_http(db, llm_client, request)
+    return await _orchestrate_or_http(db, llm_client, request, use_team=True)
 
 
 # ---------------------------------------------------------------------------
