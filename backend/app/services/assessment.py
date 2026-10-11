@@ -1,0 +1,445 @@
+"""판정 기록 서비스 (D1) — 오케스트레이터 결과를 `assessment_history` 한 행으로.
+
+이 모듈이 방향 C 의 번역기다. 오케스트레이터는 아직 **배정 주체의 어휘**로
+말한다(`승인가능`/`적합선석없음`/`전후보배정불가`). 우리가 화면·게이트·보고서에
+쓰는 어휘는 **판정자의 어휘**다(`적합`/`주의`/`부적합`/`판정불가`). 여기서 옮긴다.
+
+  OverallDecision.APPROVED  = "이 배를 이 선석에 넣어도 된다"   ← 배정 허가
+  AssessmentLevel.FIT       = "지금 배정된 자리가 조건에 맞는다" ← 사실 확인
+
+두 문장은 같은 계산에서 나오지만 **하는 말이 다르다.** 전자는 우리가 할 수 없는
+말이고 후자는 우리가 해야 하는 말이다.
+"""
+
+import logging
+from datetime import datetime, timezone
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.agents.orchestrator.schemas import OrchestratorResult, OverallDecision
+from app.agents.safety.schemas import RiskLevel, risk_level_rank
+from app.agents.weather.schemas import WorkStatus
+from app.models.assessment_history import (
+    AssessmentAction,
+    AssessmentHistory,
+    AssessmentLevel,
+    AssessmentRecipient,
+    AssessmentStage,
+)
+
+logger = logging.getLogger("assessment")
+
+
+# ── 시점 판정 ────────────────────────────────────────────────────────────────
+#
+# AIS 항해상태 하나만 본다. PORT-MIS 를 쓰지 않는 이유는 모델 주석 참고
+# (수집창 [어제, 오늘+3일] 밖이면 동결 — 2026-09-21 실측 79척 중 32척).
+
+def stage_from_nav_status(
+    nav_status_code: str | None, *, target_source: str | None = None,
+) -> AssessmentStage | None:
+    """UPA 항해상태 → 시점. 상태를 모르면 None(= 판정불가로 기록).
+
+    [2026-09-29] 상태가 없어도 판정 대상이 PORT-MIS 배정 선석이면 입항 전이다 — 아직 AIS 에
+    잡히지 않은 배다. 예전엔 None 이 되어 '입항전'으로 기록되면서도 조치안·받는 곳이 비었다
+    (운영 308 HYODONG CHEMI, [판정 요청] 경로).
+    """
+    nav = (nav_status_code or "").strip()
+    if not nav:
+        return AssessmentStage.BEFORE_ARRIVAL if target_source == "PORT-MIS" else None
+    if nav.startswith("정박(계류)"):
+        return AssessmentStage.DURING_CARGO
+    if nav.startswith("정박(앵커링)"):
+        return AssessmentStage.BEFORE_BERTHING
+    return AssessmentStage.BEFORE_ARRIVAL
+
+
+# ── 조치안을 받을 곳 ─────────────────────────────────────────────────────────
+#
+# 9/17 회의 §3 이 조사한 그대로다. 울산항은 결정 주체가 셋으로 나뉘어 있고,
+# 시점이 곧 주체를 정한다 — 같은 '부적합'이라도 입항 전이면 선석회의가, 계류
+# 중이면 터미널이 받는다. 1차 보고서가 이 셋을 "VTS 가 승인"으로 뭉갠 것이
+# 근본 오류였다(회의 §2).
+
+_RECIPIENT_BY_STAGE = {
+    AssessmentStage.BEFORE_ARRIVAL: AssessmentRecipient.BERTH_OPERATOR,
+    AssessmentStage.BEFORE_BERTHING: AssessmentRecipient.VTS,
+    AssessmentStage.DURING_CARGO: AssessmentRecipient.TERMINAL,
+}
+
+_ACTION_BY_STAGE = {
+    AssessmentStage.BEFORE_ARRIVAL: AssessmentAction.ALTERNATIVE_BERTH,
+    AssessmentStage.BEFORE_BERTHING: AssessmentAction.HOLD_ARRIVAL,
+    AssessmentStage.DURING_CARGO: AssessmentAction.HOLD_CARGO,
+}
+
+
+_SUBJECT_BY_SOURCE = {"AIS": "지금 접안한 선석", "PORT-MIS": "배정된 선석"}
+
+
+def level_from_decision(result: OrchestratorResult) -> tuple[AssessmentLevel, str]:
+    """오케스트레이터 귀결 → 판정 등급. 두 번째 값은 사람이 읽는 한 줄.
+
+    [2026-09-29] 주어를 "배정된 선석"에서 출처대로 바꿨다. 판정 대상은 대개 AIS 로 본 실제
+    접안 부두인데 PORT-MIS 는 아직 정박지로 적고 있어(실측 27척 중 26척), "배정된"은 사실과
+    달랐다. 등급 비교(_same_as_last)는 문구를 보지 않으므로 이 변경으로 기록 행이 새로 생기지 않는다.
+    같은 날 PORT-MIS 출처는 "배정된 선석"으로 다시 바꿨다 — 아직 붙지 않은 배의 사전배정 자리이고,
+    배정(PORT-MIS)과 접안(AIS)은 다른 사실이다. 정박지 신고는 판정 대상이 아니라 여기 오지 않는다.
+    """
+    decision = result.overall_decision
+    subject = _SUBJECT_BY_SOURCE.get(result.target_source, "이 선석")
+
+    if decision is OverallDecision.APPROVED:
+        # 기상이 '정상'이 아니면 통과라도 주의다 — 하역중단 임계를 넘지 않았을 뿐
+        # 여유가 없다는 뜻이다. 판단불가면 '모르면 닫는다'(원칙 1).
+        weather = result.weather_assessment
+        if weather.status is WorkStatus.UNKNOWN:
+            return AssessmentLevel.UNKNOWN, "기상 관측이 없거나 오래돼 판단할 수 없습니다"
+        if weather.status is not WorkStatus.NORMAL:
+            return AssessmentLevel.CAUTION, f"{subject}은 조건에 맞으나 기상이 '{weather.status.value}'입니다"
+        # [2026-09-26] 오케스트레이터는 혼재 '배정불가'만 탈락시키므로 여기 온 결과의
+        # 혼재 등급은 안전·주의·위험 중 하나다. 예전엔 이 등급을 보지 않아 위험이어도
+        # '적합'으로 기록됐다(실측: 적합인데 혼재 주의 2건). 위험·주의는 '주의'로 둔다 —
+        # 배정불가만 막고 나머지는 경고로 보인다는 safety/service.py 의 설계를 따른다.
+        safety = result.safety_assessment
+        if safety is not None and safety.risk_level in (RiskLevel.DANGER, RiskLevel.CAUTION):
+            # [2026-09-28] 같은 선박 화물끼리 충돌해도 '주의'가 된다 — 어느 쪽인지 문장에 적는다.
+            adjacent_level = max(
+                (v.risk_level for v in safety.cargo_verdicts),
+                key=risk_level_rank, default=safety.risk_level,
+            )
+            if safety.onboard_conflicts and risk_level_rank(adjacent_level) < risk_level_rank(safety.risk_level):
+                return (
+                    AssessmentLevel.CAUTION,
+                    f"{subject}은 조건에 맞으나 같은 선박 화물끼리 혼재 충돌이 있습니다 — 격리 적재 확인 필요",
+                )
+            return (
+                AssessmentLevel.CAUTION,
+                f"{subject}은 조건에 맞으나 인접 화물 혼재 등급이 '{safety.risk_level.value}'입니다",
+            )
+        if result.conditions:
+            # 교차 확인 조건(체류 중 기상 악화 예보 등). 등급은 적합 그대로다(결정 7-1).
+            return AssessmentLevel.FIT, f"{subject}이 이 선박·화물 조건에 맞습니다(조건부 — 체류 중 악화 예보)"
+        return AssessmentLevel.FIT, f"{subject}이 이 선박·화물 조건에 맞습니다"
+
+    if decision is OverallDecision.WEATHER_BLOCKED:
+        if result.evidence_missing:
+            return AssessmentLevel.UNKNOWN, "기상 관측이 없거나 오래돼 판단할 수 없습니다"
+        return AssessmentLevel.UNFIT, "기상 조건이 작업 한계를 넘었습니다"
+
+    if decision is OverallDecision.NO_ELIGIBLE_BERTH:
+        # ★ 같은 귀결이라도 **근거 부족**과 **실제 부적합**을 갈라야 한다.
+        #   회의 §4 "근거 부족을 안전과 구분".
+        #
+        # 검증모드에서 이 귀결이 나오는 경로는 둘이다.
+        #   (가) 근거 부족 — PORT-MIS 표기를 선석 마스터에서 못 찾았다 / 수심
+        #        자료가 없다 / 체류 구간 조위 예보가 없다. 배가 위험하다는 뜻이
+        #        전혀 아니다. **우리가 모른다**는 뜻이다.
+        #   (나) 실제 부적합 — 가용수심 대비 흘수가 정말 모자란다.
+        #
+        # 실측으로 이 구분이 필요했다(2026-09-21). '장생포호안' 배정 4척이 전부
+        # '부적합'으로 찍혔는데, 장생포호안은 정규화 해소가 안 되는 시설이다
+        # (신항남방파제T/S부두 01 과 함께 알려진 미해소 2건). 부적합으로 두면
+        # 관제사는 "이 배에 문제가 있다"로 읽는다. 실제로 필요한 조치는 선박
+        # 점검이 아니라 **별칭 사전 보강**이다.
+        detail = result.assignment_trace[0] if result.assignment_trace else None
+        if result.evidence_missing:
+            return AssessmentLevel.UNKNOWN, detail or "판정에 필요한 근거가 없습니다"
+        return AssessmentLevel.UNFIT, detail or f"{subject}이 이 선박 조건에 맞지 않습니다"
+
+    if decision is OverallDecision.ALL_CANDIDATES_UNSAFE:
+        # 검증모드에서 이 귀결은 "다른 선석이 없다"가 아니라 **"배정된 그 선석이
+        # 이 배에 안 맞는다"** 는 뜻이다. 대상이 한 곳뿐이기 때문이다.
+        return AssessmentLevel.UNFIT, f"이웃 화물과 혼재 충돌이 있어 {subject}이 이 화물에 맞지 않습니다"
+
+    return AssessmentLevel.UNKNOWN, f"판정 결과를 해석할 수 없습니다({decision.value})"
+
+
+def _axes_from_result(result: OrchestratorResult) -> dict:
+    """축별 등급·근거. 값이 없는 축은 넣지 않는다 — 빈 축과 '통과한 축'은 다르다."""
+    axes: dict = {}
+
+    weather = result.weather_assessment
+    axes["기상"] = {
+        "status": weather.status.value,
+        "assessed_at_utc": weather.assessed_at_utc.isoformat(),
+        "reasons": list(weather.reasons),
+    }
+    if weather.thresholds_used is not None:
+        axes["기상"]["berth_group"] = getattr(weather.thresholds_used, "berth_group", None)
+
+    if result.selected_berth is not None:
+        b = result.selected_berth
+        axes["흘수"] = {
+            "wharf_name": b.wharf_name,
+            "depth_m": b.depth_m,
+            "margin_m": b.draught_margin_m,
+        }
+
+    if result.safety_assessment is not None:
+        s = result.safety_assessment
+        axes["혼재"] = {
+            "target_cargo": s.target_cargo_name,
+            "risk_level": s.risk_level.value,
+            "conflict_count": len(s.conflicts) + len(s.imdg_conflicts),
+            "key_hazards": list(s.key_hazards[:5]),
+            # [2026-09-25] 한 입항 건의 화물마다 따로 판정한 결과. 대표 등급은 가장
+            # 위험한 화물의 것이다(is_governing).
+            "cargos": [
+                {
+                    "name": v.target_cargo_name,
+                    "chem_id": v.chem_id,
+                    "risk_level": v.risk_level.value,
+                    "conflict_count": v.conflict_count + v.bulk_conflict_count,
+                    "governing": v.is_governing,
+                }
+                for v in s.cargo_verdicts
+            ],
+            # [2026-09-28] 같은 선박 화물끼리의 혼재 충돌(격리 적재 확인 필요).
+            "onboard": [c.model_dump() for c in s.onboard_conflicts],
+        }
+
+    # [2026-09-27] 도구별 의견(등급 · 확인한 것 · 못 본 것)과 교차 확인 조건. condition_key 는
+    # '변화 없음' 비교(_QUERY_LAST)에 쓴다.
+    if result.opinions:
+        axes["의견"] = [o.model_dump() for o in result.opinions]
+    if result.conditions:
+        axes["조건"] = list(result.conditions)
+    axes["condition_key"] = result.condition_key
+
+    # '점유' 축은 일부러 비워 둔다.
+    #   ① 우리는 선석을 점유하지 않는다(방향 C) — 우리 표의 예약을 점유라고 셀 수 없다.
+    #   ② 오경보 백테스트 S2 가 점유 초과를 **정보로 강등**했다. PORT-MIS 출항 시각이
+    #      예정값이라 동시 계류를 과대 계산한다(2026-09-21 실측 7/125 = 5.6%).
+    # 실제 점유는 mart.vessel_presence(선박 위치 판정)가 관측으로 보여준다.
+    return axes
+
+
+def _alternatives_detail(result: OrchestratorResult) -> dict | None:
+    """대체 선석 **제안**. 회의 §3 의 조치안 '대체선석'이다.
+
+    배정이 아니다 — 어떤 자리도 잠그지 않는다. 관제사가 읽고 선석회의·VTS·
+    터미널에 넘길 근거일 뿐이다. 그래서 키 이름도 assignment 가 아니라 suggestion 이다.
+    """
+    if not result.suggested_alternatives:
+        return {"suggested": [], "note": result.suggestion_note} if result.suggestion_note else None
+    return {
+        "suggested": [
+            {
+                "rank": c.rank,
+                "wharf_name": c.wharf_name,
+                "berth_id": c.berth_id,
+                "port_name": c.port_name,
+                "depth_m": c.depth_m,
+                # 해도 수심이 아니라 **체류 중 최저 조위를 더한 가용수심** 기준 여유다
+                # (suggest_alternative_berths 참고) — 검증과 같은 잣대를 쓴다.
+                "margin_m": round(c.draught_margin_m, 2),
+                "occupancy": c.occupancy_status.value,
+            }
+            for c in result.suggested_alternatives
+        ],
+        "note": result.suggestion_note,
+        "disclaimer": "제안입니다. 선석 배정 권한은 선석회의·VTS·터미널에 있습니다.",
+    }
+
+
+def _reasons_from_result(result: OrchestratorResult, headline: str) -> list[str]:
+    reasons = [headline]
+    reasons.extend(result.conditions)
+    reasons.extend(result.assignment_trace)
+    reasons.extend(result.weather_assessment.reasons)
+    # [2026-09-25] 화물이 둘 이상이면 화물별 혼재 등급을 한 줄로 — 대표 등급만 보면
+    # 어느 화물 때문에 그 등급인지 알 수 없다.
+    verdicts = result.safety_assessment.cargo_verdicts if result.safety_assessment else []
+    if len(verdicts) > 1:
+        parts = ", ".join(
+            f"{v.target_cargo_name} {v.risk_level.value}{' (대표)' if v.is_governing else ''}"
+            for v in verdicts
+        )
+        reasons.append(f"화물 {len(verdicts)}종 혼재 판정: {parts}")
+    onboard = result.safety_assessment.onboard_conflicts if result.safety_assessment else []
+    if onboard:
+        pairs = ", ".join(sorted({f"{c.cargo_a_name}↔{c.cargo_b_name}" for c in onboard}))
+        reasons.append(f"같은 선박 화물 혼재 충돌: {pairs} — 격리 적재 확인 필요")
+    if result.suggested_alternatives:
+        names = ", ".join(
+            f"{c.wharf_name}(여유 {c.draught_margin_m:.1f}m)"
+            for c in result.suggested_alternatives
+        )
+        reasons.append(f"대체 선석 제안: {names} — 제안이며 배정이 아닙니다")
+    elif result.suggestion_note:
+        reasons.append(f"대체 선석을 제안하지 못했습니다: {result.suggestion_note}")
+    # [2026-09-29] 판정에 쓰지 못한 근거 — 맨 뒤에 둔다(앞 줄을 읽는 화면·챗봇의 순서를 바꾸지 않게).
+    reasons.extend(f"확인 필요: {m}" for m in result.needs_check)
+    # 중복 제거하되 순서는 유지한다(관제사가 읽는 순서가 근거의 우선순위다).
+    seen: set[str] = set()
+    return [r for r in reasons if r and not (r in seen or seen.add(r))]
+
+
+_QUERY_LAST = text("""
+    SELECT level, stage, action,
+           -- 직전 제안의 계선시설 목록. 등급이 같아도 **추천이 바뀌면 기록해야** 한다.
+           COALESCE(
+               (SELECT string_agg(x->>'wharf_name', ',' ORDER BY x->>'rank')
+                FROM jsonb_array_elements(action_detail->'alternatives'->'suggested') AS x),
+               ''
+           ) AS suggested_key,
+           -- 교차 확인 조건(예보 등급 등). 시각은 넣지 않은 요약이다.
+           COALESCE(axes->>'condition_key', '') AS condition_key,
+           -- [2026-09-29] 어느 입항 건의 판정인가. 입항 건이 바뀌면 등급이 같아도 새로 기록한다.
+           COALESCE(input_snapshot->>'port_call_key', '') AS port_call_key
+    FROM assessment_history
+    WHERE call_sign = :call_sign
+    ORDER BY assessed_at_utc DESC
+    LIMIT 1
+""")
+
+
+def _same_as_last(last, stage_value: str, level: AssessmentLevel,
+                  action_value: str | None, suggested_key: str, condition_key: str = "",
+                  port_call_key: str = "") -> bool:
+    """직전 기록과 시점·등급·조치안·제안·조건·입항 건이 모두 같은가 — 같으면 새로 기록하지 않는다.
+
+    [2026-09-29] 입항 건(port_call_key)을 더했다. 새 입항 건인데 등급이 같으면 기록이 생기지 않아,
+    화면이 새 입항 건 옆에 지난 입항 건 판정을 붙여 보였다(실측 12h 밖 기록 7척 전부 화물이 달랐다).
+    키를 모르는 호출(빈 값)은 입항 건을 비교하지 않는다.
+    """
+    return last is not None and last["stage"] == stage_value and last["level"] == level.value \
+        and last["action"] == action_value and last["suggested_key"] == suggested_key \
+        and last["condition_key"] == condition_key \
+        and (not port_call_key or last["port_call_key"] == port_call_key)
+
+
+async def record_assessment(
+    db: AsyncSession,
+    *,
+    call_sign: str,
+    vessel_name: str | None,
+    stage: AssessmentStage | None,
+    wharf_name: str | None,
+    level: AssessmentLevel,
+    headline: str,
+    axes: dict | None = None,
+    reasons: list[str] | None = None,
+    action: AssessmentAction | None = None,
+    action_detail: dict | None = None,
+    input_snapshot: dict | None = None,
+    suggested_key: str = "",
+    condition_key: str = "",
+) -> bool:
+    """판정 1건을 남긴다. 실제로 기록했으면 True.
+
+    **같은 시점·같은 등급·같은 조치안·같은 제안이면 기록하지 않는다.**
+    watch_arrivals 는 10분마다 도는데 매번 쓰면 하루 144행이 한 배에 쌓여
+    타임라인이 읽히지 않는다. 우리가 보고 싶은 건 상태가 아니라 **변화**다
+    (회의 §5 "시점별 재호출 · 변화 추적").
+
+    제안(대체 선석)을 키에 넣은 이유 — 등급이 '부적합' 그대로여도 **어느 선석을
+    권하는지가 바뀌면 그건 관제사에게 새 정보다.** 빈 자리 사정이나 기상이 달라져
+    추천이 바뀌었는데 기록이 안 되면, 화면은 몇 시간 전 추천을 계속 보여준다.
+    기상 수치처럼 매 주기 흔들리는 값은 일부러 키에서 뺐다 — 그걸 넣으면 10분마다
+    새 행이 쌓여 원래 막으려던 문제로 되돌아간다.
+    """
+    stage_value = stage.value if stage is not None else AssessmentStage.BEFORE_ARRIVAL.value
+    action_value = action.value if action is not None else None
+
+    last = (await db.execute(_QUERY_LAST, {"call_sign": call_sign})).mappings().first()
+    if _same_as_last(last, stage_value, level, action_value, suggested_key, condition_key,
+                     (input_snapshot or {}).get("port_call_key") or ""):
+        return False
+
+    recipient = _RECIPIENT_BY_STAGE.get(stage) if (stage is not None and action is not None) else None
+
+    db.add(AssessmentHistory(
+        call_sign=call_sign,
+        vessel_name=vessel_name,
+        stage=stage_value,
+        wharf_name=wharf_name,
+        level=level.value,
+        axes=axes or {},
+        reasons=reasons or [headline],
+        action=action_value,
+        action_detail=action_detail,
+        recipient=recipient.value if recipient is not None else None,
+        changed_from=last["level"] if last is not None else None,
+        input_snapshot=input_snapshot,
+        assessed_at_utc=datetime.now(timezone.utc),
+    ))
+    return True
+
+
+def _action_for(level: AssessmentLevel, stage: AssessmentStage | None) -> AssessmentAction | None:
+    # 조치안은 **판정이 섰고 그 판정이 '적합'이 아닐 때만** 붙는다.
+    # 받는 곳은 시점이 정한다(회의 §3).
+    #
+    # '판정불가'에는 조치안을 달지 않는다. 근거가 없어서 판단을 못 한 건인데
+    # "대체 선석을 검토하라"고 권하면 근거 없는 조언이 된다 — 실제로 필요한 건
+    # 배를 옮기는 게 아니라 **빠진 근거를 채우는 것**이다(표기 미해소면 별칭 사전,
+    # 흘수 미상이면 선박제원). 등급 자체가 그 사실을 이미 말하고 있다.
+    actionable = level in (AssessmentLevel.UNFIT, AssessmentLevel.CAUTION)
+    return _ACTION_BY_STAGE.get(stage) if (actionable and stage is not None) else None
+
+
+def _suggested_key(result: OrchestratorResult) -> str:
+    return ",".join(c.wharf_name for c in sorted(result.suggested_alternatives, key=lambda x: x.rank))
+
+
+async def is_unchanged_from_last(
+    db: AsyncSession,
+    *,
+    call_sign: str,
+    stage: AssessmentStage | None,
+    result: OrchestratorResult,
+    port_call_key: str = "",
+) -> bool:
+    """이 결과를 record_from_orchestrator 에 넘기면 '변화 없음'으로 기록이 생략되는가.
+
+    판정 잡이 LLM 을 부르기 전에 쓴다(2026-09-26). 기록 여부를 가르는 값(시점·등급·
+    조치안·제안)은 전부 규칙으로 정해지므로 LLM 없이 계산한 결과로 판단할 수 있다.
+    """
+    level, _ = level_from_decision(result)
+    action = _action_for(level, stage)
+    stage_value = stage.value if stage is not None else AssessmentStage.BEFORE_ARRIVAL.value
+    last = (await db.execute(_QUERY_LAST, {"call_sign": call_sign})).mappings().first()
+    return _same_as_last(last, stage_value, level, action.value if action is not None else None,
+                         _suggested_key(result), result.condition_key, port_call_key)
+
+
+async def record_from_orchestrator(
+    db: AsyncSession,
+    *,
+    call_sign: str,
+    vessel_name: str | None,
+    stage: AssessmentStage | None,
+    wharf_name: str | None,
+    result: OrchestratorResult,
+    input_snapshot: dict | None = None,
+) -> bool:
+    """오케스트레이터 결과를 그대로 판정 1건으로 옮긴다."""
+    level, headline = level_from_decision(result)
+    action = _action_for(level, stage)
+
+    action_detail = None
+    if action is not None:
+        action_detail = result.decision_detail()
+        alternatives = _alternatives_detail(result)
+        if alternatives is not None:
+            action_detail["alternatives"] = alternatives
+
+    return await record_assessment(
+        db,
+        call_sign=call_sign,
+        vessel_name=vessel_name,
+        stage=stage,
+        wharf_name=wharf_name,
+        level=level,
+        headline=headline,
+        axes=_axes_from_result(result),
+        reasons=_reasons_from_result(result, headline),
+        action=action,
+        action_detail=action_detail,
+        input_snapshot=input_snapshot,
+        suggested_key=_suggested_key(result),
+        condition_key=result.condition_key,
+    )

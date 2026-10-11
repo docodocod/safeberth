@@ -1,0 +1,205 @@
+"""기상분석 에이전트 오케스트레이션.
+
+흐름: 기준 시각(as_of) 확정 -> berth_weather_threshold에서 부두그룹 임계값 조회
+-> weather_obs/wave_obs에서 그 시각 이전 최신 관측치 조회 -> 결측/오래됨(staleness)
+판단 -> rule_engine으로 정상/하역중단/이안/호스분리 4단계 판정(온산 MVP 이식,
+9-3절 "순수 신규" 데이터).
+
+expected_completion_at이 주어지면 weather_forecast(기상청 getVilageFcst,
+data-pipeline이 수집)에서 as_of~expected_completion_at 구간의 예보를 조회해
+같은 rule_engine으로 각 시점을 평가하고, 정상이 아닌 상태로 악화되는 가장
+이른 시점을 찾아 사전 경고를 만든다 (계획서의 "예상 하역완료시간과 단기예보
+비교" 요구사항 — 이 기능은 팀원 MVP에는 없고 기존 구현에만 있어 그대로 유지).
+"""
+
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import GLOBAL_DEFAULT_BERTH_GROUP
+
+from .data_access import get_berth_threshold, get_forecast_range, get_latest_wave, get_latest_weather
+from .rule_engine import wave_applies_to as rule_engine_wave_applies_to
+from .rule_engine import PRECIP_STOP_MM, MAX_STALENESS, evaluate, severity
+from .schemas import (
+    ForecastPoint,
+    ForecastWarning,
+    ObservationFactor,
+    ThresholdStep,
+    ThresholdsUsed,
+    WeatherAssessmentRequest,
+    WeatherAssessmentResult,
+    WorkStatus,
+)
+
+
+def _is_stale(observed_at_utc: datetime | None, as_of: datetime) -> bool:
+    if observed_at_utc is None:
+        return True
+    return (as_of - observed_at_utc) > MAX_STALENESS
+
+
+def _thresholds_used(threshold, *, requested_group: str | None) -> ThresholdsUsed | None:
+    """판정에 쓴 임계 행을 응답용으로 옮긴다.
+
+    화면이 임계값을 따로 적어 두지 않아도 되게 하려는 것이다 — 판정과 표시가
+    서로 다른 임계를 쓰는 상태를 구조적으로 막는다.
+    """
+    if threshold is None:
+        return None
+    return ThresholdsUsed(
+        berth_group=threshold.berth_group,
+        is_global_default=threshold.berth_group == GLOBAL_DEFAULT_BERTH_GROUP
+        and requested_group not in (None, GLOBAL_DEFAULT_BERTH_GROUP),
+        stop=ThresholdStep(wind_ms=threshold.stop_wind_ms, wave_m=threshold.stop_wave_m),
+        unberth=ThresholdStep(wind_ms=threshold.unberth_wind_ms, wave_m=threshold.unberth_wave_m),
+        disconnect=ThresholdStep(
+            wind_ms=threshold.disconnect_wind_ms, wave_m=threshold.disconnect_wave_m
+        ),
+        source=threshold.source,
+    )
+
+
+async def _build_forecast_warning(
+    db: AsyncSession,
+    *,
+    as_of: datetime,
+    expected_completion_at: datetime,
+    threshold,
+    extra_condition_active: bool,
+    wave_applies: bool = True,
+) -> ForecastWarning:
+    """wave_applies — 현재 관측 판정과 같은 값을 받는다(2026-09-29). 예보 파고도 해상 예보라 항내 부두에는
+    쓰지 않는다 — 예전엔 넘기지 않아, 풍속은 멀쩡한데 예보 파고 하나로 '하역중단 예보' 조건이 붙었다
+    (실측: 우선호@달포부두 "09/29 13:00 부터 '하역중단' 예보")."""
+    forecast_rows = await get_forecast_range(db, start=as_of, end=expected_completion_at)
+
+    points: list[ForecastPoint] = []
+    worst_status = WorkStatus.NORMAL
+    earliest_deterioration_at: datetime | None = None
+    earliest_causes: list[str] = []
+    no_forecast_after: datetime | None = None
+
+    for row in forecast_rows:
+        point_status, point_reasons = evaluate(
+            wind_speed_ms=row.wind_speed_ms,
+            wind_is_stale=False,
+            wave_height_m=row.wave_height_m,
+            wave_is_stale=False,
+            threshold=threshold,
+            extra_condition_active=extra_condition_active,
+            precip_mm=row.precip_mm,
+            wave_applies=wave_applies,
+        )
+        points.append(
+            ForecastPoint(
+                fcst_at_utc=row.fcst_at_utc,
+                status=point_status,
+                wind_speed_ms=row.wind_speed_ms,
+                wave_height_m=row.wave_height_m,
+                precip_mm=row.precip_mm,
+            )
+        )
+        # 값이 없는 예보 시각(판단불가)은 악화가 아니라 예보 공백이다 — 따로 센다.
+        if point_status is WorkStatus.UNKNOWN:
+            if no_forecast_after is None:
+                no_forecast_after = row.fcst_at_utc
+            continue
+        if severity(point_status) > severity(worst_status):
+            worst_status = point_status
+        if earliest_deterioration_at is None and point_status is not WorkStatus.NORMAL:
+            earliest_deterioration_at = row.fcst_at_utc
+            # "강수량 1.0mm/h >= 1.0mm/h -> 하역중단" → "강수량 1.0mm/h >= 1.0mm/h"
+            earliest_causes = [r.split(" -> ")[0] for r in point_reasons if " -> " in r]
+
+    # 예보 행 자체가 체류 종료 전에 끝나도 공백이다(예보 간격 3시간보다 길게 비면).
+    last_at = points[-1].fcst_at_utc if points else as_of
+    if no_forecast_after is None and expected_completion_at - last_at > timedelta(hours=3):
+        no_forecast_after = last_at
+
+    return ForecastWarning(
+        window_end_utc=expected_completion_at,
+        forecast_points_checked=len(points),
+        will_deteriorate=earliest_deterioration_at is not None,
+        worst_status=worst_status,
+        earliest_deterioration_at_utc=earliest_deterioration_at,
+        earliest_deterioration_causes=earliest_causes,
+        no_forecast_after_utc=no_forecast_after,
+        points=points,
+    )
+
+
+async def assess_weather(db: AsyncSession, request: WeatherAssessmentRequest) -> WeatherAssessmentResult:
+    as_of = request.as_of or datetime.now(timezone.utc)
+
+    threshold = await get_berth_threshold(db, berth_group=request.berth_group)
+    weather_row = await get_latest_weather(db, as_of=as_of)
+    wave_row = await get_latest_wave(db, as_of=as_of)
+
+    wind_speed_ms = weather_row.wind_speed_ms if weather_row else None
+    wind_observed_at = weather_row.observed_at_utc if weather_row else None
+    wind_is_stale = _is_stale(wind_observed_at, as_of)
+
+    wave_height_m = wave_row.wave_height_sig_m if wave_row else None
+    wave_observed_at = wave_row.observed_at_utc if wave_row else None
+    wave_is_stale = _is_stale(wave_observed_at, as_of)
+
+    # 강수량은 실황 관측 소스가 없어(weather_obs API 미제공) request.precip_observed
+    # (관제사 육안 확인)가 유일한 '지금 비가 오는지' 신호다. True면 하역중단
+    # 기준(PRECIP_STOP_MM)에 닿은 것으로 본다 — 정확한 mm은 모르니 그 이상
+    # 단계로는 자동 격상하지 않는다.
+    current_precip_mm = PRECIP_STOP_MM if request.precip_observed else None
+
+    # [2026-09-21, D2 ②] 외해 부이 파고를 항내 부두에 대입하지 않는다.
+    # wharf_name 을 안 넘긴 호출은 예전대로 적용한다(하위 호환) — 다만 그러면
+    # 항내 부두가 외해 파고로 막히므로, 판정 경로는 반드시 이 값을 채워야 한다.
+    # [2026-09-29] 부두그룹만 넘긴 호출(대시보드 '부두 기상 판정')도 같은 규칙을 그룹 이름에 쓴다 — 예전엔
+    #   이 경로가 하위 호환으로 적용돼, 에이전트는 외해 파고를 안 쓰는데 그 패널만 "파고 1.6m < 2.0m 정상"처럼
+    #   OTK·정일 등 항내 부두에 외해 파고를 대입했다. 부이 그룹(한국석유공사원유부이)은 그대로 적용된다.
+    wave_target = request.wharf_name or request.berth_group
+    wave_applies = rule_engine_wave_applies_to(wave_target) if wave_target else True
+
+    status, reasons = evaluate(
+        wind_speed_ms=wind_speed_ms,
+        wind_is_stale=wind_is_stale,
+        wave_height_m=wave_height_m,
+        wave_is_stale=wave_is_stale,
+        threshold=threshold,
+        extra_condition_active=request.extra_condition_active,
+        precip_mm=current_precip_mm,
+        wave_applies=wave_applies,
+    )
+
+    forecast_warning = None
+    if request.expected_completion_at is not None:
+        forecast_warning = await _build_forecast_warning(
+            db,
+            as_of=as_of,
+            expected_completion_at=request.expected_completion_at,
+            threshold=threshold,
+            extra_condition_active=request.extra_condition_active,
+            wave_applies=wave_applies,
+        )
+
+    return WeatherAssessmentResult(
+        status=status,
+        assessed_at_utc=as_of,
+        wind=ObservationFactor(
+            value=wind_speed_ms,
+            unit="m/s",
+            observed_at_utc=wind_observed_at,
+            station_name=weather_row.station_name if weather_row else None,
+            is_stale=wind_is_stale,
+        ),
+        wave=ObservationFactor(
+            value=wave_height_m,
+            unit="m",
+            observed_at_utc=wave_observed_at,
+            station_name=wave_row.station_name if wave_row else None,
+            is_stale=wave_is_stale,
+        ),
+        visibility_m=weather_row.visibility_m if weather_row else None,
+        thresholds_used=_thresholds_used(threshold, requested_group=request.berth_group),
+        reasons=reasons,
+        forecast_warning=forecast_warning,
+    )

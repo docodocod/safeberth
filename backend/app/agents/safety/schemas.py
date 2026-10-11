@@ -1,0 +1,373 @@
+"""안전관제 에이전트 요청/응답 스키마.
+
+스케줄링 에이전트와 선석(Berth) 지식그래프가 아직 없으므로, 인접 선석의
+취급 화물 정보는 이 API의 요청 바디로 직접 받는다. 추후 스케줄링 에이전트가
+생기면 그 출력(추천 선석 + 인접 선석 화물 목록)을 그대로 이 요청 바디로
+매핑해 연결하면 된다.
+"""
+
+from enum import Enum
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class RiskLevel(str, Enum):
+    """4단계 위험등급. 값 순서가 곧 심각도 순서(SAFE < CAUTION < DANGER < BLOCKED)."""
+
+    SAFE = "안전"
+    CAUTION = "주의"
+    DANGER = "위험"
+    # ★ 이 값은 "배정불가"로 둔다. 방향 C 어휘로는 어색해 보이지만 의도된 것이다.
+    #
+    # 9/17 2차 회의자료가 RiskLevel 을 **바뀌지 않는 기준점**으로 적고 있다.
+    # 합의 안건은 "등급 이름을 기존 RiskLevel(안전/주의/위험/배정불가)과 **따로
+    # 둘지**"였고(노션 준비자료 185행 · PPT slide16), 답은 "따로 둔다"였다 —
+    # 그래서 AssessmentLevel(적합/주의/부적합/판정불가)이 따로 생겼다.
+    # RiskLevel 자체를 바꾸자는 논의는 없었다.
+    #
+    # 2026-09-22 에 이걸 "하역불가"로 바꿨다가 되돌렸다. 회의가 바꾸기로 한
+    # "배정불가"는 PPT slide6 대조표의 것, 즉 **OverallDecision 의 값**이었다
+    # (승인가능 / 기상불가 / 적합선석없음 / 배정불가 → 적합 · 주의 · 부적합 ·
+    # 판정불가). 두 Enum 에 우연히 같은 한글 문자열이 있어 섞은 것이다.
+    #
+    # 바꾸려면 발표자료(slide16)와 함께 팀이 정할 일이다. rule_engine.py 주석의
+    # 실측 기록("배정불가 1,326건" 등)도 이 어휘로 세어져 있다.
+    BLOCKED = "배정불가"
+
+
+_RISK_LEVEL_ORDER: dict[RiskLevel, int] = {
+    RiskLevel.SAFE: 0,
+    RiskLevel.CAUTION: 1,
+    RiskLevel.DANGER: 2,
+    RiskLevel.BLOCKED: 3,
+}
+
+
+def risk_level_rank(level: RiskLevel) -> int:
+    return _RISK_LEVEL_ORDER[level]
+
+
+def max_risk_level(a: RiskLevel, b: RiskLevel) -> RiskLevel:
+    return a if risk_level_rank(a) >= risk_level_rank(b) else b
+
+
+class CargoRef(BaseModel):
+    """화물 식별자. chem_id(Neo4j Chemical.id / msds_chemical.chem_id) 또는
+    cas_no 중 최소 하나는 있어야 한다."""
+
+    chem_id: str | None = None
+    cas_no: str | None = None
+    name_hint: str | None = Field(default=None, description="식별 실패 시 로그/에러 메시지용 참고 이름")
+    unload_method_name: str | None = Field(
+        default=None,
+        description="이번 하역에 신고된 하역 방식(예: '펌프', '크레인'). msds_chemical이 아니라 "
+        "화물 manifest(선적건)마다 다른 값이라 chem_id로는 알 수 없어 호출부가 직접 넘긴다. "
+        "target_cargo에만 의미가 있다(포장기준 판정은 대상 화물 자신에 대한 것 — 인접 화물 "
+        "혼재금지와는 다른 축의 판정). 생략하면 포장기준 판정 자체를 하지 않는다.",
+    )
+
+    @model_validator(mode="after")
+    def _require_one_identifier(self) -> "CargoRef":
+        if not self.chem_id and not self.cas_no:
+            raise ValueError("CargoRef는 chem_id 또는 cas_no 중 하나가 반드시 있어야 합니다.")
+        return self
+
+
+class AdjacentCargo(BaseModel):
+    berth_name: str
+    cargo: CargoRef
+    distance_m: float | None = Field(
+        default=None,
+        description="대상 선석과의 실측 거리(m, berth_neo4j_loader의 좌표 계산). "
+        "PILOT_ADJACENT_PAIRS(수동 큐레이션) 유래거나 좌표 결측이면 None — "
+        "[2026-08-23] 판정에는 쓰지 않는다 — 부두 간 거리는 IMDG 규율 대상이 "
+        "아니어서 표시용으로만 내려준다(rule_engine.compute_imdg_berth_adjacency_floor 참고).",
+    )
+
+
+class SafetyAssessmentRequest(BaseModel):
+    """기상 데이터는 의도적으로 포함하지 않는다. 기상 임계값 기반 작업가능 여부 판정은
+    기상분석 에이전트의 책임 범위이고, 안전관제 에이전트는 화물/MSDS/혼재금지 판단만 담당한다.
+    기상×안전 조합 판단은 각 에이전트 결과를 받는 상위 오케스트레이터에서 처리한다."""
+
+    target_cargo: CargoRef
+    target_cargos: list[CargoRef] = Field(
+        default_factory=list,
+        description="[2026-09-25] 같은 배가 이번 입항에 함께 실은 나머지 화물. 화물마다 인접 "
+        "화물과 대조하고, 가장 위험한 화물의 판정이 응답의 최상위 등급·근거가 된다. "
+        "비우면 target_cargo 하나만 본다(하위 호환).",
+    )
+    adjacent_cargos: list[AdjacentCargo] = Field(default_factory=list)
+    call_sign: str | None = Field(
+        default=None,
+        description="[2026-09-29] 대상 화물을 실은 배의 호출부호. 주면 이번 입항 건 화물 신고의 "
+        "하역방식(unload_method_name)을 채운다 — 비어 있는 화물만. 화물만 골라 묻는 경우엔 비운다.",
+    )
+
+    def all_targets(self) -> list[CargoRef]:
+        """target_cargo + target_cargos (같은 식별자는 한 번만)."""
+        seen: set[tuple[str | None, str | None]] = set()
+        out: list[CargoRef] = []
+        for c in [self.target_cargo, *self.target_cargos]:
+            key = (c.chem_id, c.cas_no)
+            if key not in seen:
+                seen.add(key)
+                out.append(c)
+        return out
+
+
+class CargoVerdictSummary(BaseModel):
+    """판정 대상 배가 실은 화물 하나에 대한 판정 요약 (2026-09-25).
+
+    최상위 응답은 가장 위험한 화물 기준이다. 나머지 화물이 무엇이었고 각각 몇 등급이었는지는
+    이 목록으로만 알 수 있다 — 관제사가 "어느 화물 때문에 이 등급인가"를 보게 한다.
+    """
+
+    target_cargo_name: str
+    chem_id: str
+    risk_level: RiskLevel
+    conflict_count: int = 0
+    bulk_conflict_count: int = 0
+    packaging_violation_count: int = 0
+    unassessed_count: int = 0
+    is_governing: bool = Field(default=False, description="최상위 등급을 결정한 화물이면 True")
+
+
+class IncompatibleConflict(BaseModel):
+    adjacent_berth: str
+    adjacent_chem_id: str
+    adjacent_name: str
+    shared_category: str = Field(description="혼재금지 매칭이 발생한 IncompatibleMaterial 카테고리명")
+    direction: str = Field(description="target_incompatible_with_adjacent | adjacent_incompatible_with_target")
+
+
+class ImdgSegregationConflict(BaseModel):
+    """IMDG Code Chapter 7.2 공인 일반 격리표 기반 충돌.
+
+    IncompatibleConflict(MSDS 텍스트 마이닝)와는 별도 신호 — 화물 개별 반응성이
+    아니라 위험물 대분류(Class) 간 국제 공인 규정에 근거한다.
+    """
+
+    adjacent_berth: str
+    adjacent_chem_id: str
+    adjacent_name: str
+    target_imdg_class: str
+    adjacent_imdg_class: str
+    segregation_code: str = Field(description="IMDG 격리 코드(1~4). 클수록 강한 물리적 이격 요구")
+    distance_m: float | None = Field(
+        default=None, description="실측 거리(m). None이면 거리 미상 — 등급 판정 시 보수적으로 처리됨"
+    )
+
+
+class ImdgUnconfirmedPair(BaseModel):
+    """두 화물의 IMDG Class가 모두 확인됐으나 SEGREGATE 관계(공인 격리규정)가
+    그래프에 없는 경우. ImdgSegregationConflict(코드 1~4 확인됨)와 달리 "격리
+    불필요"인지 "개별 확인 필요(코드 X)"인지 로더가 구분해 저장하지 않으므로,
+    자동 판정을 내리지 않고 관제사 확인 대상으로만 노출한다."""
+
+    adjacent_berth: str
+    adjacent_chem_id: str
+    adjacent_name: str
+    target_imdg_class: str
+    adjacent_imdg_class: str
+
+
+class UnassessedPair(BaseModel):
+    """혼재금지 판정 근거가 불완전했던 인접 화물 (2026-08-23 추가).
+
+    "충돌 없음"에는 성격이 다른 두 가지가 섞여 있다 — 양쪽 근거를 다 보고
+    겹치는 게 없었던 경우와, 애초에 볼 근거가 없어 아무것도 못 걸러낸 경우다.
+    후자를 안전으로 표시하면 관제사가 "확인됐다"로 오독한다. 이 목록이 그
+    구분을 드러낸다.
+
+    실측 근거(2026-08-23): 36종 1,260개 순서쌍 중 판정 근거가 불완전한 쌍이
+    200건(22.1%)이었고, 원인은 KOSHA MSDS의 J08("피해야 할 물질")이 27/36종에서
+    "자료없음"이라는 데 있다(KOSHA API 직접 호출로 원천 확인).
+    """
+
+    adjacent_berth: str
+    adjacent_chem_id: str
+    adjacent_name: str
+    assessability: str = Field(
+        description="단방향판정(한쪽 근거만 있음) 또는 판정불가(양방향 모두 근거 없음)"
+    )
+    reason: str = Field(description="어느 근거가 없어서 판정하지 못했는지")
+
+
+class BulkCompatibilityConflict(BaseModel):
+    """벌크 액체화학물질 호환성 그룹(참고자료 기반, bulk_compatibility.py) 충돌.
+
+    MSDS 텍스트 마이닝(IncompatibleConflict), IMDG 공인 격리표
+    (ImdgSegregationConflict)와 근거가 다른 세 번째 참고 신호 — 이 축이 나타내는
+    출처·적용범위의 한계는 bulk_compatibility.py 모듈 docstring 참고."""
+
+    adjacent_berth: str
+    adjacent_chem_id: str
+    adjacent_name: str
+    target_group: int
+    target_group_name: str
+    adjacent_group: int
+    adjacent_group_name: str
+    reason: str
+
+
+class OnboardConflict(BaseModel):
+    """같은 선박이 이번 입항에 함께 실은 화물끼리의 혼재 충돌 (2026-09-28 추가).
+
+    인접 선석 축과 같은 근거(MSDS 혼재금지·46 CFR 150 호환성 그룹)로 본다. 다만 한 선박
+    안에서는 탱크를 격리하면 함께 실을 수 있으므로(IBC Code 3.1.3) 규정 위반이 아니라
+    "격리 적재 확인 필요"다 — 배의 등급을 최소 '주의'로만 올린다(배정불가 아님).
+    """
+
+    cargo_a_chem_id: str
+    cargo_a_name: str
+    cargo_b_chem_id: str
+    cargo_b_name: str
+    basis: str = Field(description="'46 CFR 150' 또는 'MSDS'")
+    detail: str = Field(description="충돌 근거 — 호환성 그룹 쌍 또는 혼재금지 카테고리")
+
+
+class PackagingViolation(BaseModel):
+    """포장·하역방식 부적합. IncompatibleConflict/ImdgSegregationConflict와 달리
+    인접 화물이 아니라 대상 화물 자신의 신고 내용(용기등급 vs 하역방식)만으로 판정한다."""
+
+    packing_group: str
+    unload_method_name: str
+    reason: str
+
+
+class LLMAssessment(BaseModel):
+    """LLM 구조화 출력. **등급(risk_level)은 여기 없다.**
+
+    [2026-08-23] risk_level을 뺐다. 이전에는 LLM이 등급을 정하고 코드가
+    rule_engine_floor로 하한만 보정했는데, 실측 결과 LLM의 등급이 입력 근거와
+    무관하게 움직였다:
+      · 충돌 0건인 조합에서도 24/24회 '위험'으로 격상 (근거 없이)
+      · 충돌 1건인 조합도 '위험' — 즉 0건과 1건을 구분하지 못했다
+      · 48회 측정에서 '안전'이 단 한 번도 나오지 않아, 4단계 등급이 사실상
+        '위험' 하나로 수렴했다
+    원인도 규명됐다 — 프롬프트의 86%가 대상 화물 자체의 유해성 문구(벤젠 기준
+    3,814자)인데 risk_level이 '무엇에 대한 등급'인지 정의가 없어서, 모델이
+    "이 배치가 위험한가"가 아니라 "이 화물이 위험한 물질인가"에 답하고 있었다
+    (ablation: 발췌 제거 또는 정의 추가 시 각각 100% 교정됨).
+
+    등급은 이제 규칙엔진이 확정한다(service.assess_safety). LLM은 원래 잘하는
+    것 — MSDS 근거에 기반한 서술 — 만 맡는다. 부수 효과로 등급이 결정적이 되어
+    같은 입력에 항상 같은 등급이 나오고, LLM을 기다리지 않고도 등급을 확정할 수
+    있다(45ms, /safety/verdict).
+
+    [2026-09-29] reasoning(등급 설명)을 cargo_profile(화물 특성)로 바꿨다. "등급이 왜 이렇게
+    나왔나"를 LLM 에 쓰게 했더니, 입력의 대부분인 MSDS 유해성을 원인으로 댔다 — 같은 선박
+    화물 충돌로 '주의'가 된 배를 "발암성 때문에 주의"라고 썼다(nano·mini 모두 재현).
+    등급의 이유는 코드가 verdict_basis 로 확정하고, LLM 은 화물 특성과 체크리스트만 쓴다.
+    """
+
+    checklist: list[str] = Field(description="이번 판정 결과와 MSDS 에 맞춘 하역 전 확인 항목 (3~5개)")
+    key_hazards: list[str] = Field(description="핵심 유해성 요약 (2~5개)")
+    cargo_profile: str = Field(
+        description="이 화물이 하역 현장에서 무엇이 위험한지 1~2문장. 등급·충돌·검사 여부는 쓰지 않는다"
+    )
+
+
+class SafetyVerdict(BaseModel):
+    """LLM 없이 확정되는 판정 — `POST /safety/verdict` 응답 (2026-08-23 추가).
+
+    SafetyAssessmentResult에서 LLM 생성 필드(checklist·key_hazards·reasoning)만
+    뺀 모양이다. 화면이 결론을 먼저 띄우고 서술을 이어서 채우도록 하기 위한
+    것으로, 여기 실린 risk_level은 나중에 /safety/assess가 주는 값과 항상
+    같다 — 등급을 규칙엔진이 확정하므로 뒤집히지 않는다.
+    """
+
+    target_cargo_name: str
+    risk_level: RiskLevel = Field(
+        description="규칙엔진이 확정한 등급. /safety/assess의 risk_level과 동일한 값이다."
+    )
+    rule_engine_floor: RiskLevel
+    conflicts: list[IncompatibleConflict] = Field(default_factory=list)
+    imdg_conflicts: list[ImdgSegregationConflict] = Field(default_factory=list)
+    imdg_unconfirmed_pairs: list[ImdgUnconfirmedPair] = Field(default_factory=list)
+    bulk_compatibility_conflicts: list[BulkCompatibilityConflict] = Field(default_factory=list)
+    packaging_violations: list[PackagingViolation] = Field(default_factory=list)
+    unassessed_pairs: list[UnassessedPair] = Field(default_factory=list)
+    msds_sections_used: list[str] = Field(default_factory=list)
+    imdg_classes: dict[str, str] = Field(default_factory=dict)
+    cargo_verdicts: list[CargoVerdictSummary] = Field(
+        default_factory=list, description="화물별 판정 요약. 화물이 하나면 원소도 하나다."
+    )
+    onboard_conflicts: list[OnboardConflict] = Field(
+        default_factory=list, description="같은 선박 화물끼리의 혼재 충돌. 있으면 등급이 최소 '주의'."
+    )
+    adjacent_count: int = Field(default=0, description="비교한 이웃 화물 수. 0 이면 혼재 비교 대상이 없었다")
+    verdict_basis: list[str] = Field(
+        default_factory=list, description="[2026-09-29] 등급의 근거 — 코드가 판정 결과에서 만든 문장"
+    )
+    needs_check: list[str] = Field(
+        default_factory=list, description="[2026-09-29] 확인 필요 — 판정에 쓰지 못한 근거('대상 — 이유')"
+    )
+
+
+class SafetyAssessmentResult(BaseModel):
+    target_cargo_name: str
+    risk_level: RiskLevel
+    checklist: list[str]
+    key_hazards: list[str]
+    reasoning: str
+    conflicts: list[IncompatibleConflict]
+    imdg_conflicts: list[ImdgSegregationConflict] = Field(
+        default_factory=list, description="IMDG Code 공인 일반 격리표 기반 충돌"
+    )
+    imdg_unconfirmed_pairs: list[ImdgUnconfirmedPair] = Field(
+        default_factory=list,
+        description="두 화물의 IMDG Class는 모두 알려져 있으나 SEGREGATE 관계가 없어 "
+        "코드 X(개별 확인 필요)인지 로더 미등재인지 구분되지 않는 화물쌍. "
+        "rule_engine_floor를 최소 '주의'로 격상시키는 근거이며, 자동으로 배정불가 "
+        "처리하지는 않는다 — 도메인 전문가 확인 전까지의 잠정 조치.",
+    )
+    bulk_compatibility_conflicts: list[BulkCompatibilityConflict] = Field(
+        default_factory=list,
+        description="벌크 액체화학물질 호환성 그룹(참고자료 기반) 충돌 — 국내/국제 법적 "
+        "구속력이 확정된 축이 아니라 제3의 참고 신호. bulk_compatibility.py 참고.",
+    )
+    packaging_violations: list[PackagingViolation] = Field(
+        default_factory=list,
+        description="용기등급 대비 하역방식 부적합 (target_cargo.unload_method_name을 넘긴 경우만 판정됨)",
+    )
+    unassessed_pairs: list["UnassessedPair"] = Field(
+        default_factory=list,
+        description="혼재금지 판정 근거가 불완전한 인접 화물. 여기 실린 화물은 "
+        "'충돌 없음'이 '안전 확인'을 뜻하지 않는다 — 볼 근거가 없어 아무것도 "
+        "걸러내지 못한 것이다. rule_engine_floor를 최소 '주의'로 격상시킨다. "
+        "원인은 대개 KOSHA MSDS의 J08('피해야 할 물질')이 '자료없음'인 것으로, "
+        "2026-08-23 API 원천 확인 결과 36종 중 27종이 해당한다.",
+    )
+    rule_engine_floor: RiskLevel = Field(description="그래프 탐색 기반 결정적 하한 등급 (MSDS 텍스트 + 벌크 호환성그룹 + 포장기준 + 판정가능성 + 같은 선박 혼재 중 가장 심각한 쪽)")
+    msds_sections_used: list[str] = Field(description="프롬프트 근거로 사용된 MSDS detail 섹션 키 목록")
+    imdg_classes: dict[str, str] = Field(
+        default_factory=dict,
+        description="대상·인접 화물의 chem_id -> IMDG Class 코드. imdg_conflicts에 안 걸린 "
+        "화물쌍도 각자 Class 자체는 여기서 알 수 있다 — 화면이 'SEGREGATE 관계 없음'을 "
+        "'공인 규정상 X(격리 불필요, 두 Class 모두 알려짐)'와 '이 Class 조합이 그래프에 "
+        "안 실려서 모름'을 구분해 보여주는 데 쓴다. 값이 없는 chem_id는 HAS_IMDG_CLASS "
+        "관계 자체가 없다는 뜻이다.",
+    )
+    cargo_verdicts: list[CargoVerdictSummary] = Field(
+        default_factory=list,
+        description="[2026-09-25] 화물별 판정 요약. 최상위 필드는 is_governing=True 인 화물 기준이다.",
+    )
+    onboard_conflicts: list[OnboardConflict] = Field(
+        default_factory=list,
+        description="[2026-09-28] 같은 선박 화물끼리의 혼재 충돌. 있으면 risk_level 이 최소 '주의'"
+        "(격리 적재 확인 필요 — IBC Code 3.1.3 상 격리하면 함께 실을 수 있어 배정불가는 아니다).",
+    )
+    adjacent_count: int = Field(default=0, description="비교한 이웃 화물 수. 0 이면 혼재 비교 대상이 없었다")
+    verdict_basis: list[str] = Field(
+        default_factory=list,
+        description="[2026-09-29] 등급의 근거 — 코드가 판정 결과에서 만든 문장. 화면은 이걸 등급 바로 "
+        "아래에 둔다(LLM 서술에 맡기지 않는다).",
+    )
+    needs_check: list[str] = Field(
+        default_factory=list, description="[2026-09-29] 확인 필요 — 판정에 쓰지 못한 근거('대상 — 이유')"
+    )
+    cargo_profile: str = Field(
+        default="", description="[2026-09-29] LLM 이 쓴 화물 특성 1~2문장(참고). 등급의 이유가 아니다"
+    )

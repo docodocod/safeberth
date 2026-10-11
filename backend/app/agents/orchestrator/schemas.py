@@ -1,0 +1,207 @@
+"""오케스트레이터 요청/응답 스키마.
+
+스케줄링·안전관제·기상분석 세 에이전트의 출력을 종합한다(계획서 19p
+"교차 검증 및 종합 의사결정"). 각 서브 에이전트의 스키마를 그대로 재사용해
+불필요한 변환 계층을 두지 않는다.
+"""
+
+from datetime import datetime
+from enum import Enum
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+from app.agents.safety.schemas import CargoRef, SafetyAssessmentResult
+from app.agents.scheduling.schemas import BerthCandidate, VesselSpec
+from app.agents.tools import Opinion
+from app.agents.weather.schemas import WeatherAssessmentResult
+
+
+class OverallDecision(str, Enum):
+    """계획서 19p 로직의 4가지 귀결 + 온산 MVP 이식으로 추가된 5번째 상태.
+
+    APPROVED 외 네 상태는 모두 "하역을 진행하면 안 되는" 상태라는 공통점이 있다 —
+    관제사가 화면에서 한눈에 구분할 수 있도록 원인별로 분리했다.
+
+    [2026-09-22] 값에서 **우리가 승인·배정한다는 뜻**을 걷어냈다.
+
+      "승인가능"      -> "적합"        우리는 승인하지 않는다. 조건에 맞는지만 말한다.
+      "전후보배정불가" -> "전 후보 부적합"  우리는 배정을 거부하는 주체가 아니다.
+
+    '배정'이라는 단어 자체를 지운 것이 아니다 — `NO_ELIGIBLE_BERTH`("적합선석없음")는
+    **남이 한 배정**을 가리키는 서술이라 그대로 둔다. 문제는 그 배정을 우리가 한다고 읽히는
+    어휘였다. [2026-09-29] 판정 문구의 "배정된 선석이…"는 걷어냈다 — 판정 대상은 대개
+    AIS 로 본 실제 접안 부두이고 PORT-MIS 신고와 다르다(실측 27척 중 26척). 출처대로
+    "지금 접안한 선석" / "배정된 선석"이라 쓴다(target_source).
+
+    이 값은 DB 에 저장되지 않는다(`assessment_history` 는 `AssessmentLevel` 을 쓴다).
+    화면이 `decision_label` 로 그대로 표시하므로 값이 곧 관제사가 읽는 문장이다.
+    """
+
+    APPROVED = "적합"
+    WEATHER_BLOCKED = "기상불가_중단권고"
+    NO_ELIGIBLE_BERTH = "적합선석없음"
+    ALL_CANDIDATES_UNSAFE = "전 후보 부적합"
+    # [2026-09-27] WAITING_ANCHORAGE("정박지대기")를 없앴다 — 정박지 배정 경로를 걷어냈다
+    # (27번 설계안 D단계). 정박지는 위치로 관찰만 한다.
+
+
+class OrchestratorRequest(BaseModel):
+    vessel: VesselSpec
+    cargo: CargoRef
+    cargos: list[CargoRef] = Field(
+        default_factory=list,
+        description="[2026-09-25] 같은 입항 건에 함께 실은 나머지 화물. 안전 판정은 화물마다 "
+        "돌려 가장 위험한 쪽을 대표로 삼고, 탐색모드 선석은 모든 화물 카테고리를 취급하는 "
+        "곳만 남긴다. 비우면 cargo 하나만(하위 호환).",
+    )
+    window_start: datetime = Field(description="희망 접안 시작 시각(UTC)")
+    window_end: datetime = Field(
+        description="희망 접안 종료(출항 예정) 시각(UTC). 기상분석 에이전트의 "
+        "예상 하역완료시각(expected_completion_at)으로도 그대로 쓰인다."
+    )
+    draught_margin_m: float | None = Field(
+        default=None, ge=0,
+        description="수심 대비 흘수 안전 여유(m). 비우면 규칙 max(1.0m, 흘수 10%) — scheduling/ukc.py",
+    )
+    weather_as_of: datetime | None = Field(
+        default=None, description="기상 판단 기준 시각(UTC). 생략 시 서버 현재 시각(=지금 기상으로 판단)"
+    )
+    assigned_wharf_name: str = Field(
+        min_length=1,
+        description="검증할 선석 — 배가 실제로 붙은 부두(위치 판정) 또는 접안 전이면 PORT-MIS "
+        "신고 선석. [2026-09-27] 필수다: 선석을 새로 고르는 탐색모드를 걷어냈다(우리는 "
+        "배정하지 않는다). 다른 자리가 필요하면 대체 선석 제안(/scheduling/alternatives)을 쓴다.",
+    )
+    target_source: Literal["AIS", "PORT-MIS"] | None = Field(
+        default=None,
+        description="[2026-09-29] assigned_wharf_name 의 출처. AIS=실제 접안 부두, PORT-MIS=접안 전 신고 선석. "
+        "판정 문구가 '지금 접안한 선석'/'배정된 선석'으로 갈린다. 비우면 '이 선석'.",
+    )
+    reported_wharf_name: str | None = Field(
+        default=None,
+        description="[2026-09-29] PORT-MIS 신고 계류시설. 실제 접안 부두와 다르면 판정 경로에 한 줄 남긴다 "
+        "(신고 정정이 필요하다는 신호).",
+    )
+
+    @model_validator(mode="after")
+    def _window_must_be_ordered(self) -> "OrchestratorRequest":
+        if self.window_end <= self.window_start:
+            raise ValueError("window_end는 window_start보다 이후여야 합니다.")
+        return self
+
+
+class RejectedCandidate(BaseModel):
+    """차순위 재탐색 과정에서 배정불가로 탈락한 후보의 기록 (추론 로그용)."""
+
+    berth_id: str
+    rank: int
+    reason: str
+
+
+class OrchestratorResult(BaseModel):
+    overall_decision: OverallDecision
+    selected_berth: BerthCandidate | None = Field(
+        default=None, description="검증을 통과한 선석. 승인가능이 아니면 None"
+    )
+    safety_assessment: SafetyAssessmentResult | None = Field(
+        default=None, description="배정된 선석에 대한 안전관제 결과(혼재 배정불가여도 싣는다). 기상불가/적합선석없음이면 None"
+    )
+    weather_assessment: WeatherAssessmentResult
+    rejected_candidates: list[RejectedCandidate] = Field(
+        default_factory=list, description="배정불가로 탈락해 재탐색된 후보 이력"
+    )
+    assignment_trace: list[str] = Field(
+        default_factory=list,
+        description="판단 경로와 근거(선석 확인 결과, 점유 참고 등)",
+    )
+    suggested_alternatives: list[BerthCandidate] = Field(
+        default_factory=list,
+        description="배정된 시설이 부적합할 때 내놓는 **대체 선석 제안**(최대 3). "
+        "9/17 회의 §3 의 조치안 '대체선석'이다. **의견일 뿐 배정이 아니다** — 어떤 "
+        "자리도 잠그지 않고, 실제로 옮길지는 선석회의·VTS·터미널이 정한다. "
+        "적합 판정이면 비어 있다(옮길 이유가 없으므로).",
+    )
+    suggestion_note: str | None = Field(
+        default=None,
+        description="대체안을 못 찾았을 때 그 이유. 후보가 있으면 None. "
+        "'없음'과 '못 찾음'을 구분하려고 둔다.",
+    )
+    evidence_missing: bool = Field(
+        default=False,
+        description="결론이 '근거 부족'에서 나왔는가. True 면 판정 자체를 못 한 것이고"
+        "(계선시설 표기 미해소·조위 예보 없음 등), False 면 근거를 갖추고 내린 판정이다. "
+        "회의 §4 '근거 부족을 안전과 구분' — 이 값이 assessment_history.level 에서 "
+        "'판정불가'와 '부적합'을 가른다.",
+    )
+    summary: str = Field(description="관제사가 읽을 종합 의견 (1~2문장)")
+    # [2026-09-29] berth_match_summary(선석배정현황 팝업용 LLM 한 문장)를 없앴다 — 화면이 더 이상
+    # 쓰지 않고(BerthAssignmentMap 은 판정 기록 reasons 를 쓴다) 문장만 매번 만들고 있었다.
+    level: str = Field(
+        default="",
+        description="[2026-09-29] 판정 등급 — 적합 | 주의 | 부적합 | 판정불가. 판정 기록(assessment_history.level)과 "
+        "같은 함수로 정한다. 화면은 overall_decision 이 아니라 이 값으로 등급·색을 정한다 "
+        "(예전엔 혼재 '주의'가 초록 '적합'으로, 근거 부족이 빨간 '적합선석없음'으로 보였다).",
+    )
+    headline: str = Field(default="", description="[2026-09-29] 등급의 이유 한 줄(판정 기록 reasons 첫 줄과 같다)")
+    needs_check: list[str] = Field(
+        default_factory=list,
+        description="[2026-09-29] 확인 필요 — 도구 의견의 '못 본 것'을 모은 것('대상 — 이유')",
+    )
+    target_source: Literal["AIS", "PORT-MIS"] | None = Field(
+        default=None, description="판정한 선석의 출처(요청값 그대로)"
+    )
+    opinions: list[Opinion] = Field(
+        default_factory=list,
+        description="검증모드에서 도구마다 낸 의견(등급 · 확인한 것 · 못 본 것). 27번 설계안 B단계",
+    )
+    conditions: list[str] = Field(
+        default_factory=list,
+        description="교차 확인으로 붙은 조건. 예: 지금은 적합이나 체류 중 기상 악화 예보 — "
+        "등급은 그대로 두고(적합) 조건만 붙인다. 그 시각이 되면 기상 게이트가 하역을 멈춘다.",
+    )
+    condition_key: str = Field(
+        default="",
+        description="판정 기록의 '변화 없음' 비교에 쓰는 조건 요약(시각 제외 — 예보가 새로 날 때마다 "
+        "시각이 흔들려도 새 행이 쌓이지 않게).",
+    )
+
+    def decision_detail(self) -> dict:
+        """관제사 화면(선석배정현황 팝업 등)에 보여줄 구조화된 배정 근거.
+
+        `summary`는 LLM이 쓴 자유문이라 특정 요인(흔히 흘수)만 강조하고 실제로
+        통과한 다른 조건(카테고리/전용-대체 경로/기상)은 생략할 수 있다 — 실제로
+        관제사가 "수심 얘기만 있고 다른 근거는 안 보인다"고 지적한 사례가 있었다
+        (2026-08-19). 이 메서드는 판정에 실제로 쓰인 구조화 값을 그대로 담아서,
+        요약문이 무엇을 강조했든 전체 근거를 화면에서 확인할 수 있게 한다.
+
+        안전판정(화학물질 위험성·혼재 등)은 일부러 안 담는다(2026-08-19 재수정) —
+        그건 안전관제 에이전트의 몫이고 이미 별도 화면(선박 상세·안전심사)에서
+        보여준다. 여기는 "선석 스펙과 선박이 어떻게 매칭됐는가"(수심·흘수·전용
+        /대체 경로)만 다뤄야 두 화면의 책임이 안 섞인다.
+        """
+        detail: dict = {"trace": self.assignment_trace}
+        if self.selected_berth:
+            detail["berth"] = {
+                "rank": self.selected_berth.rank,
+                "berth_group": self.selected_berth.berth_group,
+                "depth_m": self.selected_berth.depth_m,
+                "draught_margin_m": self.selected_berth.draught_margin_m,
+                "occupancy_status": self.selected_berth.occupancy_status.value,
+            }
+        detail["weather"] = {
+            "status": self.weather_assessment.status.value,
+            "reasons": self.weather_assessment.reasons,
+        }
+        if self.rejected_candidates:
+            detail["rejected_candidates"] = [
+                {"berth_id": rc.berth_id, "rank": rc.rank, "reason": rc.reason}
+                for rc in self.rejected_candidates
+            ]
+        return detail
+
+
+class LLMSummary(BaseModel):
+    """LLM 구조화 출력 — 확정된 판정 사실을 관제사용 문장으로 다시 정리한 것."""
+
+    summary: str = Field(description="관제사가 바로 읽을 종합 의견, 1~2문장 한국어")
