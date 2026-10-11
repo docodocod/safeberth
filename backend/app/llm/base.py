@@ -1,8 +1,7 @@
 """LLM 프로바이더 공통 인터페이스.
 
-에이전트 코드(app/agents/*)는 이 인터페이스에만 의존한다. Gemini에서 OpenAI로
-교체할 때는 app.llm.factory.get_llm_client() 의 반환 구현체만 바뀌면 되고,
-에이전트 쪽 코드는 한 줄도 수정할 필요가 없다.
+에이전트 코드(app/agents/*)는 이 인터페이스에 의존한다. 구현체는 OpenAiClient 하나다
+(2026-10-11 Gemini 제거). 호출을 바꾸려면 app.llm.factory 의 반환 구현체만 바꾼다.
 """
 
 from abc import ABC, abstractmethod

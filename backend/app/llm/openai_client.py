@@ -2,8 +2,7 @@
 
 OpenAI Python SDK(https://pypi.org/project/openai/)의 Responses API 구조화
 출력(client.responses.parse(text_format=...))으로 Pydantic 스키마를 그대로
-강제한다. GeminiClient(app/llm/gemini_client.py)와 동일한 흐름 —
-app.llm.base.LLMClient 계약만 만족하므로 에이전트 코드(app/agents/*)는
+강제한다. app.llm.base.LLMClient 계약만 만족하므로 에이전트 코드(app/agents/*)는
 provider 전환 시 한 줄도 수정할 필요가 없다.
 """
 

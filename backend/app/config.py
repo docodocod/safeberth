@@ -28,9 +28,10 @@ class Settings(BaseSettings):
     neo4j_password: str
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
-    gemini_api_key: str | None = None
-    llm_provider: Literal["gemini", "openai"] = "gemini"
-    llm_model: str = "gemini-flash-latest"
+    # [2026-10-11] Gemini 를 걷어냈다 — OpenAI 단일 provider. 옛 .env 에 LLM_PROVIDER=gemini 가 남아 있으면
+    #   조용히 다른 모델로 떨어지지 않고 기동 때 검증 오류로 멈춘다.
+    llm_provider: Literal["openai"] = "openai"
+    llm_model: str = "gpt-4.1-mini"
     # [2026-09-27] 챗봇만 쓰는 모델(같은 provider). 비우면 llm_model 을 쓴다. 챗봇은 도구를
     # 고르는 에이전트라(27번 설계안 C단계) 작은 모델로는 도구 선택이 불안정하고, 판정 잡은
     # 결과가 바뀔 때만 LLM 을 부르므로 작은 모델로 충분해 둘을 나눈다.
