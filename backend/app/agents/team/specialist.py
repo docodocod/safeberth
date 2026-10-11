@@ -6,8 +6,8 @@
 
 루프: START → agent ─┬→ tools(ToolNode) ─┬→ agent …
                     └→ END              └→ END  (판정 제출됨)
-  agent 다음 END: 도구 요청이 없거나, 조회 예산을 다 썼는데 또 조회를 요청한 때(판정 없음)
-  submit_verdict 는 예산과 상관없이 허용한다 — 예산을 다 써도 판정은 낼 수 있어야 한다.
+  agent 다음 END: 도구 요청이 없거나, 이 응답의 조회까지 더하면 예산을 넘거나, 제출 시도가 상한을 넘은 때(판정 없음)
+  제출만 담은 응답은 조회 예산과 상관없이 허용한다 — 예산을 다 써도 판정은 낼 수 있어야 한다.
 
 `create_react_agent` 를 쓰지 않는 이유: 이 버전에서 폐기 예정 표시가 붙어 있고 대체 함수는 설치되지 않은
 `langchain` 패키지에 있다.
@@ -24,6 +24,9 @@ from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 
 SUBMIT = "submit_verdict"
+# [2026-10-12 최종 검토] 판정 제출 시도 상한 — 잘못된 제출(스키마 오류)을 한 번까지만 고쳐 내게 한다. 상한이 없으면
+#   잘못된 제출이 반복될 때 루프가 LangGraph 기본 재귀 한도(이 버전 10007)까지 돌아 축 하나에 유료 호출이 수천 번 나간다.
+_MAX_SUBMIT_ATTEMPTS = 2
 
 
 class AxisVerdict(BaseModel):
@@ -45,6 +48,13 @@ class _State(TypedDict, total=False):
 
 def _lookups(messages: list[AnyMessage]) -> list[ToolMessage]:
     return [m for m in messages if isinstance(m, ToolMessage) and m.name != SUBMIT]
+
+
+def _submit_attempts(messages: list[AnyMessage]) -> int:
+    return sum(
+        any(c["name"] == SUBMIT for c in (getattr(m, "tool_calls", None) or []))
+        for m in messages if isinstance(m, AIMessage)
+    )
 
 
 async def run_specialist(
@@ -75,12 +85,15 @@ async def run_specialist(
         calls = getattr(state["messages"][-1], "tool_calls", None) or []
         if not calls:
             return END
-        if any(c["name"] == SUBMIT for c in calls):
-            return "tools"
-        return "tools" if len(_lookups(state["messages"])) < max_tool_calls else END
+        if _submit_attempts(state["messages"]) > _MAX_SUBMIT_ATTEMPTS:
+            return END
+        # 같은 응답에 묶인 조회도 예산에 센다 — 제출과 함께 보내 예산을 우회하지 못하게. 넘치면 판정 없이 끝낸다(하한 유지).
+        lookups_here = sum(c["name"] != SUBMIT for c in calls)
+        return "tools" if len(_lookups(state["messages"])) + lookups_here <= max_tool_calls else END
 
     def after_tools(state: _State) -> str:
-        return END if captured else "agent"
+        # 제출이 받아들여졌거나, 제출 시도를 다 썼으면 모델을 더 부르지 않는다.
+        return END if captured or _submit_attempts(state["messages"]) >= _MAX_SUBMIT_ATTEMPTS else "agent"
 
     graph = StateGraph(_State)
     graph.add_node("agent", agent)
@@ -91,7 +104,9 @@ async def run_specialist(
     graph.add_conditional_edges("tools", after_tools, {"agent": "agent", END: END})
 
     messages: list[AnyMessage] = [SystemMessage(content=system_prompt), HumanMessage(content=task)]
-    final = (await graph.compile().ainvoke({"messages": messages}))["messages"]
+    # 재귀 한도는 위 라우팅이 틀렸을 때의 마지막 안전망이다(초과 시 GraphRecursionError — Team.decide 가 하한으로 처리).
+    limit = 2 * (max_tool_calls + _MAX_SUBMIT_ATTEMPTS) + 3
+    final = (await graph.compile().ainvoke({"messages": messages}, config={"recursion_limit": limit}))["messages"]
     last = final[-1]
     return SpecialistNote(
         verdict=captured[0] if captured else None,

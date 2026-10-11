@@ -89,3 +89,24 @@ async def test_submission_ends_the_loop():
     model = ScriptedChat(replies=[_submit("적합", "첫 제출")])
     note = await _run(model, [])
     assert note.verdict.reasoning == "첫 제출" and len(model.seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_invalid_submissions_end_the_loop():
+    # 최종 검토 Important 1 — 잘못된 제출을 계속 보내도 루프가 끝나야 한다(재제출은 1번까지)
+    model = ScriptedChat(replies=[_submit("위험", "x", call_id=f"s{i}") for i in range(10)])
+    note = await _run(model, [])
+    assert note.verdict is None and model.cursor == 2
+
+
+@pytest.mark.asyncio
+async def test_lookups_bundled_with_a_submission_cannot_bypass_the_budget():
+    # 최종 검토 Important 1 — 예산을 다 쓴 뒤 '조회 + 제출'을 한 응답에 묶어 보내도 조회는 실행되지 않는다
+    calls: list = []
+    bundled = AIMessage(content="", tool_calls=[
+        {"name": "lookup", "args": {"wharf": "B"}, "id": "c2"},
+        {"name": "submit_verdict", "args": {"level": "주의", "reasoning": "x", "evidence_refs": [], "condition_refs": []}, "id": "s1"},
+    ])
+    model = ScriptedChat(replies=[tool_call("lookup", {"wharf": "A"}), bundled])
+    note = await _run(model, [_lookup_tool(calls)], budget=1)
+    assert calls == ["A"] and note.verdict is None and note.budget_exhausted is True
