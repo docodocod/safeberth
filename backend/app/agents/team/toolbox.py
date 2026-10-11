@@ -14,6 +14,7 @@
 """
 
 import asyncio
+import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -144,6 +145,12 @@ class Toolbox:
     def tools_for(self, agent: str) -> list[BaseTool]:
         return list(self._by_agent[agent])
 
+    def _savepoint(self):
+        # [2026-10-12 최종 검토] 도구의 SQL 실패가 판정 세션의 트랜잭션을 깨지 않게 SAVEPOINT 로 감싼다 — 실패하면 도구
+        #   몫만 되돌리고, 뒤 판정 노드는 같은 세션을 계속 쓴다. 감싸지 않으면 다음 노드가 InFailedSQLTransactionError 로
+        #   죽어 /assess 가 하한 판정 대신 500 이 됐다. db 가 없으면(조회 함수를 바꿔친 단위 테스트) 그냥 지나간다.
+        return self._db.begin_nested() if self._db is not None else contextlib.nullcontext()
+
     def _add(self, **fields) -> Finding:
         finding = Finding(id=f"F{len(self.findings) + 1}", **fields)
         self.findings[finding.id] = finding
@@ -152,7 +159,7 @@ class Toolbox:
     def _who_is_at(self) -> StructuredTool:
         async def who_is_at(wharf: str) -> str:
             """부두 1곳에 지금 붙어 있는 배(화물·최근 판정 포함)와 인접 부두에 붙어 있는 배를 돌려준다. wharf 는 부두 이름."""
-            async with self._lock:
+            async with self._lock, self._savepoint():
                 self.calls.append("who_is_at")
                 found = await judgment_tools.who_is_at(self._db, self._neo4j, wharf=wharf)
             return "해당 부두를 찾지 못했습니다" if found is None else _brief(found)
@@ -162,7 +169,7 @@ class Toolbox:
     def _where_is(self) -> StructuredTool:
         async def where_is(query: str) -> str:
             """호출부호 또는 선박명(일부)으로 배를 찾아 지금 위치(접안·정박지·항해 중)·속력·화물·최근 판정을 돌려준다."""
-            async with self._lock:
+            async with self._lock, self._savepoint():
                 self.calls.append("where_is")
                 found = await judgment_tools.where_is(self._db, query=query)
             return "일치하는 선박이 없습니다" if not found else _brief(found)
@@ -174,7 +181,7 @@ class Toolbox:
             """판정 대상 부두에서 하역 중인 다른 선박의 최신 판정 중 '부적합'·'판정불가'를 찾는다. 있으면 그 부두의
             하역 밸브 게이트가 잠긴다(회의 §8). 결과의 발견(id)은 등급 상향의 근거가 될 수 있다."""
             req = self._request
-            async with self._lock:
+            async with self._lock, self._savepoint():
                 self.calls.append("same_wharf_status")
                 rows = await _fetch_same_wharf_blocked(
                     self._db, wharf=req.assigned_wharf_name, exclude_call_sign=req.vessel.call_sign, now=self._now,
@@ -202,7 +209,7 @@ class Toolbox:
             req = self._request
             notes: list[str] = []
             found: list[Finding] = []
-            async with self._lock:
+            async with self._lock, self._savepoint():
                 self.calls.append("upcoming_neighbor_conflicts")
                 berth = await judgment_tools.who_is_at(self._db, self._neo4j, wharf=req.assigned_wharf_name)
                 wharfs = (
@@ -249,7 +256,7 @@ class Toolbox:
         async def wind_trend(hours: int = 6) -> str:
             """최근 몇 시간(1~24)의 관측 풍속 시계열. 정보용 — 임계값 판정은 이미 규칙 하한에 반영돼 있다."""
             span = max(1, min(int(hours), _MAX_WIND_HOURS))
-            async with self._lock:
+            async with self._lock, self._savepoint():
                 self.calls.append("wind_trend")
                 rows = await _fetch_wind_series(self._db, since=self._now - timedelta(hours=span), until=self._now)
             if not rows:
