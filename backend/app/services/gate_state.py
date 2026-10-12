@@ -26,7 +26,7 @@ HardwarePanel.jsx 주석). 그래서 이 게이트를 여는 근거는 "이 배�
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,29 +54,78 @@ _QUERY_TABLE_EXISTS = text("SELECT to_regclass('public.assessment_history') IS N
 
 # 게이트는 계선시설 단위다. 한 시설에 여러 배가 붙어 있으면 **가장 나쁜 판정**이
 # 그 시설의 게이트를 정한다 — 한 배가 부적합인데 옆 배가 적합이라고 밸브를 열 수는 없다.
-_QUERY_GATE_SOURCE = text("""
-    WITH latest AS (
-        SELECT DISTINCT ON (call_sign)
-               call_sign, vessel_name, wharf_name, level, stage, reasons, assessed_at_utc
-        FROM assessment_history
-        WHERE stage = :during_cargo
-          -- 오래된 판정으로 밸브를 열지 않는다. 그 배는 이미 떠났을 수 있다.
-          AND assessed_at_utc > now() - interval '6 hours'
-        ORDER BY call_sign, assessed_at_utc DESC
-    )
-    SELECT wharf_name,
-           count(*) AS vessel_count,
-           bool_or(level = ANY(CAST(:blocking AS text[]))) AS blocked,
-           (array_agg(call_sign ORDER BY (level = ANY(CAST(:blocking AS text[]))) DESC))[1] AS lead_call_sign,
-           (array_agg(vessel_name ORDER BY (level = ANY(CAST(:blocking AS text[]))) DESC))[1] AS lead_vessel_name,
-           (array_agg(level ORDER BY (level = ANY(CAST(:blocking AS text[]))) DESC))[1] AS lead_level,
-           (array_agg(reasons ORDER BY (level = ANY(CAST(:blocking AS text[]))) DESC))[1] AS lead_reasons,
-           max(assessed_at_utc) AS assessed_at_utc
-    FROM latest
-    WHERE wharf_name IS NOT NULL
-    GROUP BY wharf_name
-    ORDER BY wharf_name
+#
+# [2026-10-12] 판단을 SQL 에서 gate_sources() 로 옮겼다. 실데이터로 재현한 세 문제 때문이다.
+#   ① 부두별 대표 사유를 array_agg(reasons) 로 모았는데, 같은 부두 2척의 사유 개수가 다르면(6·7개)
+#      PostgreSQL 이 'cannot accumulate arrays of different dimensionality' 로 죽었다 — 스냅샷·WS·수동 조작 API 전부 500.
+#   ② 판정 잡은 결과가 같으면 새 행을 쓰지 않는다. 그런데 6시간 창만 보니, 같은 '부적합'이 6시간 넘게 이어진 배는
+#      게이트 목록에서 사라졌다(관제 화면의 인터락 표시가 없어짐).
+#   ③ '하역중' 필터를 최신 행 고르기 전에 걸어, 최신 판정이 바뀌어도(예: 접안직전 적합) 옛 '하역중' 판정이 계속 잠갔다.
+# 옛 6시간 창의 의도는 "그 배는 이미 떠났을 수 있다"였다 — 이제 떠났는지를 AIS 접안 현황으로 직접 본다.
+_QUERY_LATEST_JUDGMENTS = text("""
+    -- 배별 최신 판정(단계 무관). 30일은 조회 비용 상한이다 — 한 판정이 30일 넘게 바뀌지 않고 계류하는 일은 드물다.
+    SELECT DISTINCT ON (call_sign)
+           call_sign, vessel_name, wharf_name, level, stage, reasons, assessed_at_utc
+    FROM assessment_history
+    WHERE assessed_at_utc > now() - interval '30 days'
+    ORDER BY call_sign, assessed_at_utc DESC
 """)
+
+_QUERY_PRESENCE_EXISTS = text("SELECT to_regclass('mart.vessel_presence') IS NOT NULL")
+
+# mart.vessel_presence 는 마지막 위치 수집 시각을 기준으로 한다(now() 가 아님). 수집이 멈춰도 배가 사라지지 않아
+# 게이트가 그 때문에 풀리지는 않는다.
+_QUERY_PRESENCE = text("""
+    SELECT upper(btrim(callsgn)) AS call_sign, presence_zone, berth_name
+    FROM mart.vessel_presence
+    WHERE NULLIF(btrim(callsgn), '') IS NOT NULL
+""")
+
+# AIS 기록이 없는 배(떠났는지 알 수 없음)는 옛 규칙대로 이 시간 안의 판정만 반영한다.
+_NO_PRESENCE_WINDOW = timedelta(hours=6)
+
+
+def _norm(call_sign: str | None) -> str:
+    return (call_sign or "").strip().upper()
+
+
+def gate_sources(
+    judgments: list[dict], presence: dict[str, tuple[str | None, str | None]], now: datetime,
+) -> list[dict]:
+    """부두별 게이트 근거. judgments 는 배별 **최신** 판정(단계 무관), presence 는 호출부호 → (AIS 구역, 접안 부두).
+
+    한 배의 판정을 그 부두 게이트에 넣는 조건 — 최신 판정이 '하역중'이고:
+      · AIS 상 그 부두에 접안 중이면 → 판정 시각과 상관없이 넣는다(②: 변화 없는 부적합이 계속 잠근다)
+      · AIS 상 다른 곳에 있거나 움직이는 중이면 → 뺀다(떠났다는 증거)
+      · AIS 기록이 없으면 → 6시간 이내 판정만 넣는다(모르는 경우는 옛 동작 그대로)
+    """
+    by_wharf: dict[str, list[dict]] = {}
+    for j in judgments:
+        if j["stage"] != AssessmentStage.DURING_CARGO.value or not j["wharf_name"]:
+            continue
+        seen = presence.get(_norm(j["call_sign"]))
+        if seen is None:
+            if now - j["assessed_at_utc"] > _NO_PRESENCE_WINDOW:
+                continue
+        elif seen != ("BERTH", j["wharf_name"]):
+            continue
+        by_wharf.setdefault(j["wharf_name"], []).append(j)
+
+    out = []
+    for wharf, rows in sorted(by_wharf.items()):
+        # 대표 = 막는 판정 중 가장 최근, 없으면 가장 최근 판정.
+        lead = max(rows, key=lambda r: (r["level"] in _BLOCKING_VALUES, r["assessed_at_utc"]))
+        out.append({
+            "wharf_name": wharf,
+            "vessel_count": len(rows),
+            "blocked": any(r["level"] in _BLOCKING_VALUES for r in rows),
+            "lead_call_sign": lead["call_sign"],
+            "lead_vessel_name": lead["vessel_name"],
+            "lead_level": lead["level"],
+            "lead_reasons": list(lead["reasons"] or []),
+            "assessed_at_utc": max(r["assessed_at_utc"] for r in rows),
+        })
+    return out
 
 
 def _gate_id(wharf_name: str) -> str:
@@ -99,12 +148,14 @@ async def build_gate_snapshot(db: AsyncSession, *, manual_overrides: dict | None
             "ts_utc": now.isoformat(),
         }
 
-    rows = (
-        await db.execute(
-            _QUERY_GATE_SOURCE,
-            {"during_cargo": AssessmentStage.DURING_CARGO.value, "blocking": list(_BLOCKING_VALUES)},
-        )
-    ).mappings().all()
+    judgments = [dict(r) for r in (await db.execute(_QUERY_LATEST_JUDGMENTS)).mappings().all()]
+    presence: dict[str, tuple[str | None, str | None]] = {}
+    if (await db.execute(_QUERY_PRESENCE_EXISTS)).scalar():
+        for r in (await db.execute(_QUERY_PRESENCE)).mappings().all():
+            # 같은 호출부호가 여러 위치 행으로 잡히면 접안(BERTH) 행을 우선한다 — 접안 사실을 놓치지 않게.
+            if r["call_sign"] not in presence or r["presence_zone"] == "BERTH":
+                presence[r["call_sign"]] = (r["presence_zone"], r["berth_name"])
+    rows = gate_sources(judgments, presence, now)
 
     gates = []
     for row in rows:
