@@ -29,15 +29,23 @@ SUBMIT = "submit_verdict"
 _MAX_SUBMIT_ATTEMPTS = 2
 
 
+class PeerQuestion(BaseModel):
+    to_axis: Literal["선석", "기상", "혼재"] = Field(description="질문을 받을 다른 축")
+    question: str = Field(description="그 축 에이전트에게 확인을 요청할 내용 1문장")
+
+
 class AxisVerdict(BaseModel):
     level: Literal["적합", "주의", "부적합"] = Field(description="이 축에 대한 당신의 최종 판정")
     reasoning: str = Field(description="판정 이유 1~2문장")
     evidence_refs: list[str] = Field(default_factory=list, description="등급을 올린 근거 발견 id(예: F1)")
     condition_refs: list[str] = Field(default_factory=list, description="조건으로 붙일 '예정' 발견 id")
+    questions: list[PeerQuestion] = Field(
+        default_factory=list, description="다른 축 에이전트에게 확인을 요청할 질문(최대 1개 권장) — Supervisor 가 전달한다",
+    )
 
 
 class SpecialistNote(BaseModel):
-    verdict: AxisVerdict | None = None
+    verdict: BaseModel | None = None
     tool_calls_used: int = 0
     budget_exhausted: bool = False
 
@@ -46,13 +54,13 @@ class _State(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
 
 
-def _lookups(messages: list[AnyMessage]) -> list[ToolMessage]:
-    return [m for m in messages if isinstance(m, ToolMessage) and m.name != SUBMIT]
+def _lookups(messages: list[AnyMessage], submit_name: str = SUBMIT) -> list[ToolMessage]:
+    return [m for m in messages if isinstance(m, ToolMessage) and m.name != submit_name]
 
 
-def _submit_attempts(messages: list[AnyMessage]) -> int:
+def _submit_attempts(messages: list[AnyMessage], submit_name: str = SUBMIT) -> int:
     return sum(
-        any(c["name"] == SUBMIT for c in (getattr(m, "tool_calls", None) or []))
+        any(c["name"] == submit_name for c in (getattr(m, "tool_calls", None) or []))
         for m in messages if isinstance(m, AIMessage)
     )
 
@@ -64,18 +72,21 @@ async def run_specialist(
     task: str,
     tools: list[BaseTool],
     max_tool_calls: int,
+    schema: type[BaseModel] = AxisVerdict,
+    submit_name: str = SUBMIT,
+    submit_description: str = "이 축의 판정을 제출한다. 제출하면 판정이 끝난다.",
 ) -> SpecialistNote:
-    captured: list[AxisVerdict] = []
+    # [2026-10-12] 계획 3: Supervisor·Critic 도 같은 루프를 쓰도록 제출 스키마와 도구 이름을 받는다.
+    captured: list[BaseModel] = []
 
-    async def submit_verdict(level: str, reasoning: str, evidence_refs: list[str], condition_refs: list[str]) -> str:
-        """이 축의 판정을 제출한다. 제출하면 판정이 끝난다."""
-        captured.append(AxisVerdict(
-            level=level, reasoning=reasoning, evidence_refs=evidence_refs, condition_refs=condition_refs,
-        ))
-        return "판정이 제출되었습니다."
+    async def submit(**kwargs) -> str:
+        captured.append(schema(**kwargs))
+        return "제출되었습니다."
 
-    submit = StructuredTool.from_function(coroutine=submit_verdict, name=SUBMIT, args_schema=AxisVerdict)
-    all_tools = [*tools, submit]
+    submit_tool = StructuredTool.from_function(
+        coroutine=submit, name=submit_name, description=submit_description, args_schema=schema,
+    )
+    all_tools = [*tools, submit_tool]
     bound = chat_model.bind_tools(all_tools)
 
     async def agent(state: _State) -> _State:
@@ -85,15 +96,15 @@ async def run_specialist(
         calls = getattr(state["messages"][-1], "tool_calls", None) or []
         if not calls:
             return END
-        if _submit_attempts(state["messages"]) > _MAX_SUBMIT_ATTEMPTS:
+        if _submit_attempts(state["messages"], submit_name) > _MAX_SUBMIT_ATTEMPTS:
             return END
         # 같은 응답에 묶인 조회도 예산에 센다 — 제출과 함께 보내 예산을 우회하지 못하게. 넘치면 판정 없이 끝낸다(하한 유지).
-        lookups_here = sum(c["name"] != SUBMIT for c in calls)
-        return "tools" if len(_lookups(state["messages"])) + lookups_here <= max_tool_calls else END
+        lookups_here = sum(c["name"] != submit_name for c in calls)
+        return "tools" if len(_lookups(state["messages"], submit_name)) + lookups_here <= max_tool_calls else END
 
     def after_tools(state: _State) -> str:
         # 제출이 받아들여졌거나, 제출 시도를 다 썼으면 모델을 더 부르지 않는다.
-        return END if captured or _submit_attempts(state["messages"]) >= _MAX_SUBMIT_ATTEMPTS else "agent"
+        return END if captured or _submit_attempts(state["messages"], submit_name) >= _MAX_SUBMIT_ATTEMPTS else "agent"
 
     graph = StateGraph(_State)
     graph.add_node("agent", agent)
@@ -110,6 +121,6 @@ async def run_specialist(
     last = final[-1]
     return SpecialistNote(
         verdict=captured[0] if captured else None,
-        tool_calls_used=len(_lookups(final)),
+        tool_calls_used=len(_lookups(final, submit_name)),
         budget_exhausted=not captured and isinstance(last, AIMessage) and bool(last.tool_calls),
     )

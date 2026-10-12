@@ -110,3 +110,25 @@ async def test_lookups_bundled_with_a_submission_cannot_bypass_the_budget():
     model = ScriptedChat(replies=[tool_call("lookup", {"wharf": "A"}), bundled])
     note = await _run(model, [_lookup_tool(calls)], budget=1)
     assert calls == ["A"] and note.verdict is None and note.budget_exhausted is True
+
+
+@pytest.mark.asyncio
+async def test_custom_schema_and_submit_name():
+    # Supervisor·Critic 도 같은 루프를 쓴다 — 스키마와 제출 도구 이름을 바꿔 끼운다
+    from pydantic import BaseModel as _BM
+
+    class _Plan(_BM):
+        items: list[str]
+
+    model = ScriptedChat(replies=[tool_call("submit_plan", {"items": ["a", "b"]})])
+    note = await run_specialist(chat_model=model, system_prompt="s", task="t", tools=[], max_tool_calls=0,
+                                schema=_Plan, submit_name="submit_plan", submit_description="계획 제출")
+    assert note.verdict == _Plan(items=["a", "b"])
+
+
+@pytest.mark.asyncio
+async def test_peer_questions_are_part_of_the_verdict():
+    args = {"level": "적합", "reasoning": "x", "evidence_refs": [], "condition_refs": [],
+            "questions": [{"to_axis": "선석", "question": "인접 부두에 지금 접안한 배가 있나요?"}]}
+    note = await _run(ScriptedChat(replies=[tool_call("submit_verdict", args)]), [])
+    assert note.verdict.questions[0].to_axis == "선석"

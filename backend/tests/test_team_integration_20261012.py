@@ -265,3 +265,22 @@ def test_present_finding_with_condition_text_never_becomes_a_condition():
                       wharf_name="효성부두", condition_text="이 문장은 조건이 되면 안 된다")
     verdict = AxisVerdict(level="적합", reasoning="x", condition_refs=["F1"])
     assert _conditions(verdict, {"F1": present}, _request()) == []
+
+
+@pytest.mark.asyncio
+async def test_peer_question_is_recorded_on_the_team(monkeypatch):
+    _patch(monkeypatch)
+    ask = tool_call("submit_verdict", {"level": "적합", "reasoning": "x", "evidence_refs": [], "condition_refs": [],
+                                       "questions": [{"to_axis": "선석", "question": "인접 부두 현황은?"}]}, "s3")
+    team, _ = _team([_submit("적합"), _submit("적합"), ask])
+    await orch._judge(None, None, None, _request(), team=team)
+    assert [(axis, q.to_axis) for axis, q in team.questions] == [("혼재", "선석")]
+
+
+@pytest.mark.asyncio
+async def test_challenge_text_reaches_the_agent(monkeypatch):
+    _patch(monkeypatch)
+    team, model = _team([_submit("적합")])
+    floor = tools.Opinion(axis="선석", level="적합", evidence=["흘수 여유 3.00m"])
+    await team.decide(floor, _request(), challenge="같은 부두 다른 배 상태를 확인했나요?")
+    assert "같은 부두 다른 배 상태를 확인했나요?" in model.seen[0][1].content

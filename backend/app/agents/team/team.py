@@ -11,7 +11,7 @@
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -21,13 +21,13 @@ from app.agents.tools import Opinion
 from .findings import Finding
 from .levels import RANK, TEAM_CAP
 from .prompts import SYSTEM_PROMPTS
-from .specialist import AxisVerdict, run_specialist
+from .specialist import AxisVerdict, PeerQuestion, run_specialist
 from .toolbox import Toolbox
 
 logger = logging.getLogger(__name__)
 
 
-def _task(opinion: Opinion, request: OrchestratorRequest) -> str:
+def _task(opinion: Opinion, request: OrchestratorRequest, challenge: str | None = None) -> str:
     subject = request.vessel.name_hint or request.vessel.call_sign or "선박"
     lines = [
         f"[대상] {subject} / {request.assigned_wharf_name} / 체류 종료 예정 {request.window_end:%Y-%m-%d %H:%M} UTC",
@@ -37,6 +37,8 @@ def _task(opinion: Opinion, request: OrchestratorRequest) -> str:
     for title, items in (("근거", opinion.evidence), ("확인한 것", opinion.checked), ("못 본 것", opinion.missing)):
         if items:
             lines += [f"[{title}]", *(f"- {i}" for i in items)]
+    if challenge:
+        lines += ["[재검토 요청 — 다른 에이전트·Supervisor 의 질문이나 반론]", f"- {challenge}"]
     return "\n".join(lines)
 
 
@@ -82,8 +84,10 @@ class Team:
     chat_model: BaseChatModel
     toolbox: Toolbox
     max_tool_calls: int = 3
+    # [2026-10-12] 계획 3: 에이전트가 다른 축에 던진 질문(제출한 축, 질문) — Supervisor 가 전달한다.
+    questions: list[tuple[str, PeerQuestion]] = field(default_factory=list)
 
-    async def decide(self, opinion: Opinion, request: OrchestratorRequest) -> Opinion:
+    async def decide(self, opinion: Opinion, request: OrchestratorRequest, *, challenge: str | None = None) -> Opinion:
         floor = opinion.level
         if floor not in RANK:
             return opinion
@@ -93,7 +97,7 @@ class Team:
             note = await run_specialist(
                 chat_model=self.chat_model,
                 system_prompt=SYSTEM_PROMPTS[opinion.axis],
-                task=_task(opinion, request),
+                task=_task(opinion, request, challenge),
                 tools=self.toolbox.tools_for(opinion.axis),
                 max_tool_calls=self.max_tool_calls,
             )
@@ -108,6 +112,8 @@ class Team:
         if verdict is None:
             update["clamped"] = "에이전트가 판정을 제출하지 않아 규칙 하한을 유지했습니다"
             return opinion.model_copy(update=update)
+        if challenge is None:                       # 재검토 응답의 질문은 기록하지 않는다(라운드 1회)
+            self.questions.extend((opinion.axis, q) for q in verdict.questions[:1])
         level, clamped, refs = _bounded_level(verdict, floor, mine, request)
         update.update(
             level=level, clamped=clamped, evidence_refs=refs, rationale=verdict.reasoning,
