@@ -196,3 +196,20 @@ async def test_llm_critic_failure_keeps_a_code_verified_raise(monkeypatch):
     ])
     result = await _orchestrate(team)
     assert result.level == "주의" and any("Critic: 선석 LLM 검토 실패" in line for line in result.deliberation)
+
+
+@pytest.mark.asyncio
+async def test_reviewer_that_submits_nothing_keeps_the_earlier_raise(monkeypatch):
+    # 2026-10-12 실측(C026): 재검토에서 판정을 제출하지 않았더니 첫 판정의 상향('주의')이 하한('적합')으로 조용히 떨어졌다.
+    # 응답 실패는 이전 판정을 유지해야 한다(검토 초점 2).
+    _patch(monkeypatch, blocked_rows=_BLOCKED)
+    team, _ = _team([
+        tool_call("same_wharf_status", {}), _submit("주의", "옆배 OTHER7 의 최신 판정이 부적합입니다", ["F1"]),
+        _submit("적합"), _submit("적합"),
+        _plan(("선석", "근거를 다시 확인했나요?")),
+        AIMessage(content="다시 봤는데 잘 모르겠습니다."),                       # 제출 없음
+        _review(True),
+    ])
+    result = await _orchestrate(team)
+    assert _axis(result, "선석").level == "주의" and result.level == "주의"
+    assert any(line.startswith("선석: 응답 실패") for line in result.deliberation)

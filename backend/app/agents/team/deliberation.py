@@ -93,7 +93,9 @@ def build_deliberation(team: "Team", request: OrchestratorRequest):
             i = next(k for k, o in enumerate(opinions) if o.axis == c.axis)
             before = opinions[i]
             after = await team.decide(_floor_of(before), request, challenge=c.question)
-            if after.floor_level is None:            # 응답 에이전트 실패 — 이전 판정 유지(검토 초점 2)
+            # 응답 에이전트 실패(예외·하한 불명) 또는 판정 미제출(rationale 이 빔) — 이전 판정 유지(검토 초점 2).
+            # [2026-10-12] 미제출을 성공으로 보면 첫 판정의 상향이 하한으로 조용히 떨어진다(실측 C026: 주의 → 적합).
+            if after.floor_level is None or not after.rationale:
                 log.append(f"{c.axis}: 응답 실패 — 이전 판정 '{before.level}' 유지")
                 continue
             opinions[i] = after
