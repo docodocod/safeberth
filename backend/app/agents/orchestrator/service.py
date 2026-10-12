@@ -101,6 +101,9 @@ async def orchestrate(
     """
     pending: list[Awaitable[None]] = []
     result = await _judge(db, neo4j_driver, llm_client, request, defer=pending, team=team)
+    # [2026-10-12] 에이전트 팀이 있으면 반론 라운드(Supervisor·재검토·Critic)를 한 번 돈다 — 등급 반영은 _finish 가 한다.
+    if team is not None:
+        result = await team.deliberate(result, request)
     result, *_ = await asyncio.gather(_finish(result, request, llm_client if summarize else None), *pending)
     return result
 

@@ -165,6 +165,10 @@ class OrchestratorResult(BaseModel):
         description="판정 기록의 '변화 없음' 비교에 쓰는 조건 요약(시각 제외 — 예보가 새로 날 때마다 "
         "시각이 흔들려도 새 행이 쌓이지 않게).",
     )
+    deliberation: list[str] = Field(
+        default_factory=list,
+        description="[2026-10-12] 에이전트 팀 회의록 — Supervisor 재검토 요청, 에이전트 응답, Critic 판단(팀이 꺼져 있으면 빈 목록)",
+    )
 
     def decision_detail(self) -> dict:
         """관제사 화면(선석배정현황 팝업 등)에 보여줄 구조화된 배정 근거.

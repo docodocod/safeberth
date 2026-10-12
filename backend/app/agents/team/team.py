@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from app.agents.orchestrator.schemas import OrchestratorRequest
+from app.agents.orchestrator.schemas import OrchestratorRequest, OrchestratorResult
 from app.agents.tools import Opinion
 
 from .findings import Finding
@@ -120,3 +120,17 @@ class Team:
             conditions=_conditions(verdict, mine, request),
         )
         return opinion.model_copy(update=update)
+
+    async def deliberate(self, result: OrchestratorResult, request: OrchestratorRequest) -> OrchestratorResult:
+        """판정 그래프가 끝난 뒤 반론 라운드를 한 번 돈다. 예외를 내지 않는다 — 실패하면 판정 그대로."""
+        if not any(o.floor_level is not None for o in result.opinions):
+            return result
+        from .deliberation import build_deliberation   # 순환 import 방지(deliberation 이 Team 을 타입으로만 쓴다)
+        try:
+            final = await build_deliberation(self, request).ainvoke(
+                {"opinions": list(result.opinions), "log": []}, config={"recursion_limit": 10},
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("반론 라운드 실패 — 판정 그대로 진행합니다", exc_info=True)
+            return result
+        return result.model_copy(update={"opinions": final["opinions"], "deliberation": final.get("log", [])})
