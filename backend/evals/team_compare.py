@@ -85,6 +85,8 @@ async def main(call_sign: str | None, limit: int | None) -> int:
                 print(f"  조건 {cs} [{o.axis}] {c}  · 이유: {o.rationale}")
             if o.clamped:
                 print(f"  보정 {cs} [{o.axis}] {o.clamped}")
+        for line in with_team.deliberation:
+            print(f"  회의록 {cs} | {line}")
 
     n = len(requests) - errors
     print(f"\n선박 {n}척 측정 (오류 {errors}척)")

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from app.agents.orchestrator.schemas import OrchestratorRequest
 from app.agents.tools import Opinion
 
+from .levels import RANK
 from .prompts import SUPERVISOR_PROMPT
 from .specialist import run_specialist
 
@@ -100,7 +101,22 @@ def build_deliberation(team: "Team", request: OrchestratorRequest):
         return {"opinions": opinions, "log": log}
 
     async def critic(state: _State) -> _State:
-        return {}                                   # Task 4 에서 채운다
+        opinions, log = list(state["opinions"]), list(state["log"])
+        for i, o in enumerate(opinions):
+            if not (o.floor_level in RANK and o.level in RANK and RANK[o.level] > RANK[o.floor_level]):
+                continue
+            revert, why = await team.critique(o)
+            if revert:
+                opinions[i] = o.model_copy(update={
+                    "level": o.floor_level, "evidence_refs": [], "clamped": f"Critic: {why}",
+                    "missing": [*o.missing, f"에이전트 상향 근거 불충분(Critic) — {why}"],
+                })
+                log.append(f"Critic: {o.axis} 상향 되돌림 — {why}")
+            elif why:
+                log.append(f"Critic: {o.axis} {why} — 코드 검증을 통과해 상향 유지")
+            else:
+                log.append(f"Critic: {o.axis} 상향 근거 확인")
+        return {"opinions": opinions, "log": log}
 
     graph = StateGraph(_State)
     graph.add_node("supervisor", supervisor)

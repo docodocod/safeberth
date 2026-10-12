@@ -146,3 +146,53 @@ async def test_no_team_means_no_deliberation(monkeypatch):
     _patch(monkeypatch)
     result = await orch.orchestrate(None, None, _NoSummaryLLM(), _request())
     assert result.deliberation == []
+
+
+@pytest.mark.asyncio
+async def test_llm_critic_can_revert_an_unsupported_raise(monkeypatch):
+    _patch(monkeypatch, blocked_rows=_BLOCKED)
+    team, _ = _team([
+        tool_call("same_wharf_status", {}), _submit("주의", "옆배 OTHER7 의 최신 판정이 부적합입니다", ["F1"]),
+        _submit("적합"), _submit("적합"), _plan(), _review(False, "옆배의 부적합은 이 배와 무관한 기상 사유"),
+    ])
+    result = await _orchestrate(team)
+    berth = _axis(result, "선석")
+    assert berth.level == "적합" and result.level == "적합"
+    assert any("Critic" in m for m in result.needs_check)          # 검토 초점 6 — 이견은 '확인 필요'에 남는다
+    assert any(line.startswith("Critic: 선석 상향 되돌림") for line in result.deliberation)
+
+
+@pytest.mark.asyncio
+async def test_code_critic_reverts_invented_numbers_without_calling_the_llm(monkeypatch):
+    # 검토 초점 4 — 이유에 근거에 없는 수치(25)가 있으면 LLM Critic 을 부르지 않고 되돌린다
+    _patch(monkeypatch, blocked_rows=_BLOCKED)
+    team, model = _team([
+        tool_call("same_wharf_status", {}), _submit("주의", "풍속 25m/s 와 옆배 OTHER7 때문입니다", ["F1"]),
+        _submit("적합"), _submit("적합"), _plan(),
+    ])
+    result = await _orchestrate(team)
+    assert model.cursor == 5 and _axis(result, "선석").level == "적합"
+    assert any("25" in line for line in result.deliberation)
+
+
+@pytest.mark.asyncio
+async def test_supported_raise_survives_the_critic(monkeypatch):
+    _patch(monkeypatch, blocked_rows=_BLOCKED)
+    team, _ = _team([
+        tool_call("same_wharf_status", {}), _submit("주의", "옆배 OTHER7 의 최신 판정이 부적합입니다", ["F1"]),
+        _submit("적합"), _submit("적합"), _plan(), _review(True),
+    ])
+    result = await _orchestrate(team)
+    assert result.level == "주의" and any(line == "Critic: 선석 상향 근거 확인" for line in result.deliberation)
+
+
+@pytest.mark.asyncio
+async def test_llm_critic_failure_keeps_a_code_verified_raise(monkeypatch):
+    # 검토 초점 2·5 — LLM Critic 이 실패해도 코드 검증을 통과한 상향은 남는다(Critic 은 올리지도, 실패로 내리지도 않는다)
+    _patch(monkeypatch, blocked_rows=_BLOCKED)
+    team, _ = _team([
+        tool_call("same_wharf_status", {}), _submit("주의", "옆배 OTHER7 의 최신 판정이 부적합입니다", ["F1"]),
+        _submit("적합"), _submit("적합"), _plan(), RuntimeError("네트워크"),
+    ])
+    result = await _orchestrate(team)
+    assert result.level == "주의" and any("Critic: 선석 LLM 검토 실패" in line for line in result.deliberation)

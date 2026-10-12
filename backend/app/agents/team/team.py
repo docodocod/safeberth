@@ -134,3 +134,27 @@ class Team:
             logger.warning("반론 라운드 실패 — 판정 그대로 진행합니다", exc_info=True)
             return result
         return result.model_copy(update={"opinions": final["opinions"], "deliberation": final.get("log", [])})
+
+    async def critique(self, opinion: Opinion) -> tuple[bool, str]:
+        """(되돌릴지, 이유). 코드 검증이 1차 — 실패하면 LLM 을 부르지 않는다. LLM 은 2차 의견이고 되돌리기만 한다."""
+        from .critic import ungrounded_tokens
+        from .deliberation import CriticVerdict
+        from .prompts import CRITIC_PROMPT
+
+        cited = [f for ref in opinion.evidence_refs if (f := self.toolbox.findings.get(ref)) is not None]
+        sources = [*opinion.evidence, *opinion.checked, *opinion.missing, *(x for f in cited for x in f.facts)]
+        bad = ungrounded_tokens(opinion.rationale, sources)
+        if bad:
+            return True, f"이유에 근거 없는 값 {bad}"
+        task = "\n".join([f"[축] {opinion.axis} — 규칙 하한 {opinion.floor_level} → 팀 판정 {opinion.level}",
+                          f"[에이전트 이유] {opinion.rationale}", "[인용한 근거]", *(f"- {x}" for f in cited for x in f.facts)])
+        try:
+            note = await run_specialist(chat_model=self.chat_model, system_prompt=CRITIC_PROMPT, task=task, tools=[],
+                                        max_tool_calls=0, schema=CriticVerdict, submit_name="submit_review",
+                                        submit_description="상향이 근거로 뒷받침되는지 제출한다.")
+        except Exception as e:  # noqa: BLE001 - LLM Critic 실패는 되돌림 사유가 아니다(코드 검증은 통과했다)
+            return False, f"LLM 검토 실패({type(e).__name__})"
+        verdict = note.verdict
+        if verdict is not None and not verdict.supported:
+            return True, verdict.issue or "근거가 상향을 뒷받침하지 않음"
+        return False, ""
