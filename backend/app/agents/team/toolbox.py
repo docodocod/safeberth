@@ -5,8 +5,9 @@
 체류 구간 같은 판정 맥락은 요청(request)이 쥐고 있어 모델이 바꿀 수 없다.
 
 발견을 만드는 도구:
-  same_wharf_status            현재 — 같은 부두에서 하역 중인 **다른** 선박의 최신 판정이 부적합·판정불가.
-                               게이트 규칙(회의 §8, services/gate_state.py)과 같은 조건이다. 자기 판정은 뺀다(순환 방지).
+  same_wharf_status            현재 — 같은 부두에서 하역 중인 **다른** 선박의 최신 판정이 부적합(게이트 규칙과 같은 조회 —
+                               회의 §8, services/gate_state.py). 판정불가는 데이터 공백인 경우가 많아 발견이 아니라 메모로만
+                               알린다(2026-10-12 실측). 자기 판정은 뺀다(순환 방지).
   upcoming_neighbor_conflicts  예정 — 체류 구간 안에 이 부두·인접 부두로 입항 예정인 선박(PORT-MIS)의 화물과
                                혼재 규칙(assess_verdict)이 '안전'이 아님. 예정값이라 조건의 근거만 된다(결정 7-1,
                                동시 계류 과대 계산 실측 7/125 — scheduling/occupancy.py).
@@ -28,7 +29,7 @@ from app.agents import tools as judgment_tools
 from app.agents.orchestrator.schemas import OrchestratorRequest
 from app.agents.safety.schemas import AdjacentCargo, CargoRef, RiskLevel, SafetyAssessmentRequest, risk_level_rank
 from app.agents.safety.service import assess_verdict
-from app.models.assessment_history import GATE_BLOCKING_LEVELS, AssessmentStage
+from app.models.assessment_history import GATE_BLOCKING_LEVELS, AssessmentLevel, AssessmentStage
 
 from .findings import Finding
 
@@ -179,7 +180,8 @@ class Toolbox:
     def _same_wharf_status(self) -> StructuredTool:
         async def same_wharf_status() -> str:
             """판정 대상 부두에서 하역 중인 다른 선박의 최신 판정 중 '부적합'·'판정불가'를 찾는다. 있으면 그 부두의
-            하역 밸브 게이트가 잠긴다(회의 §8). 결과의 발견(id)은 등급 상향의 근거가 될 수 있다."""
+            하역 밸브 게이트가 잠긴다(회의 §8). '부적합'만 발견(id)이 되어 등급 상향의 근거가 될 수 있고, '판정불가'는
+            근거 부족이라 메모로만 알린다."""
             req = self._request
             async with self._lock, self._savepoint():
                 self.calls.append("same_wharf_status")
@@ -188,16 +190,26 @@ class Toolbox:
                 )
             if not rows:
                 return _payload([], ["같은 부두에서 하역을 막는 다른 선박의 판정이 없습니다"])
+
+            def fact(r: dict) -> str:
+                return (f"같은 부두 '{req.assigned_wharf_name}'의 {r['vessel_name'] or r['call_sign']}({r['call_sign']}) "
+                        f"최신 판정 '{r['level']}' ({_kst(r['assessed_at_utc'])}) — {r['reason'] or '사유 없음'}")
+
+            # [2026-10-12 실측] 발견은 '부적합'만 만든다. 게이트는 '판정불가'에도 잠기지만(모르면 닫는다), 그 판정불가는 대개
+            #   데이터 공백(기상 관측 없음·수심 미등록)이라 위험의 증거가 아니다. 발견으로 만들었더니 데이터 공백이 옆 배의
+            #   '주의'로 번졌다(실제 모델 측정: 상향 4척 중 3척). 판정불가는 정보 메모로만 알린다.
             found = [
                 self._add(
                     kind="SAME_WHARF_BLOCKED", tense="현재", supports="주의",
-                    wharf_name=req.assigned_wharf_name, call_sign=r["call_sign"],
-                    facts=[f"같은 부두 '{req.assigned_wharf_name}'의 {r['vessel_name'] or r['call_sign']}({r['call_sign']}) "
-                           f"최신 판정 '{r['level']}' ({_kst(r['assessed_at_utc'])}) — {r['reason'] or '사유 없음'}"],
+                    wharf_name=req.assigned_wharf_name, call_sign=r["call_sign"], facts=[fact(r)],
                 )
-                for r in rows
+                for r in rows if r["level"] == AssessmentLevel.UNFIT.value
             ]
-            return _payload(found, [])
+            notes = [
+                f"{fact(r)} — 근거 부족에 따른 판정불가라 상향 근거가 아니다(이 부두 하역 밸브는 잠겨 있을 수 있다)"
+                for r in rows if r["level"] != AssessmentLevel.UNFIT.value
+            ]
+            return _payload(found, notes)
 
         return StructuredTool.from_function(coroutine=same_wharf_status, name="same_wharf_status")
 

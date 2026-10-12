@@ -216,7 +216,7 @@ async def test_wind_trend_is_information_only(monkeypatch):
 @pytest.mark.asyncio
 async def test_finding_ids_are_sequential_across_tools(monkeypatch):
     async def blocked(db, **_):
-        return [{"call_sign": "OTHER", "vessel_name": "옆배", "level": "판정불가", "reason": "x", "assessed_at_utc": NOW}]
+        return [{"call_sign": "OTHER", "vessel_name": "옆배", "level": "부적합", "reason": "x", "assessed_at_utc": NOW}]
 
     monkeypatch.setattr(tb, "_fetch_same_wharf_blocked", blocked)
     _patch_upcoming(monkeypatch, [_arrival()], RiskLevel.CAUTION)
@@ -242,3 +242,22 @@ async def test_arrival_that_raises_risk_above_the_vessels_own_level_is_a_finding
     box = _box()
     await _tool(box, "혼재", "upcoming_neighbor_conflicts").ainvoke({})
     assert box.findings["F1"].supports == "주의"
+
+
+@pytest.mark.asyncio
+async def test_unknown_judgment_on_the_same_wharf_is_a_note_not_a_finding(monkeypatch):
+    # 2026-10-12 실측 — 같은 부두 다른 배의 '판정불가'는 대개 데이터 공백(기상 관측 없음 등)이라 위험의 증거가 아니다.
+    # 발견으로 만들면 데이터 공백이 옆 배의 '주의'로 번진다(4척 중 3척). 정보 메모로만 돌려준다.
+    async def fake(db, **_):
+        return [
+            {"call_sign": "GAP", "vessel_name": "공백배", "level": "판정불가", "reason": "기상 관측이 없거나 오래돼 판단할 수 없습니다",
+             "assessed_at_utc": NOW - timedelta(hours=1)},
+            {"call_sign": "BAD", "vessel_name": "위험배", "level": "부적합", "reason": "이웃 화물과 혼재 충돌",
+             "assessed_at_utc": NOW - timedelta(hours=1)},
+        ]
+
+    monkeypatch.setattr(tb, "_fetch_same_wharf_blocked", fake)
+    box = _box()
+    out = json.loads(await _tool(box, "선석", "same_wharf_status").ainvoke({}))
+    assert [f.call_sign for f in box.findings.values()] == ["BAD"]
+    assert any("GAP" in n and "판정불가" in n for n in out["notes"])
