@@ -89,12 +89,25 @@ def _norm(call_sign: str | None) -> str:
     return (call_sign or "").strip().upper()
 
 
-def gate_sources(
-    judgments: list[dict], presence: dict[str, tuple[str | None, str | None]], now: datetime,
-) -> list[dict]:
-    """부두별 게이트 근거. judgments 는 배별 **최신** 판정(단계 무관), presence 는 호출부호 → (AIS 구역, 접안 부두).
+async def load_gate_inputs(db: AsyncSession) -> tuple[list[dict], dict[str, tuple[str | None, str | None]]]:
+    """(배별 최신 판정, AIS 접안 현황). mart.vessel_presence 가 없으면 접안 현황은 비어 있다(→ 6시간 창으로 판단)."""
+    judgments = [dict(r) for r in (await db.execute(_QUERY_LATEST_JUDGMENTS)).mappings().all()]
+    presence: dict[str, tuple[str | None, str | None]] = {}
+    if (await db.execute(_QUERY_PRESENCE_EXISTS)).scalar():
+        for r in (await db.execute(_QUERY_PRESENCE)).mappings().all():
+            # 같은 호출부호가 여러 위치 행으로 잡히면 접안(BERTH) 행을 우선한다 — 접안 사실을 놓치지 않게.
+            if r["call_sign"] not in presence or r["presence_zone"] == "BERTH":
+                presence[r["call_sign"]] = (r["presence_zone"], r["berth_name"])
+    return judgments, presence
 
-    한 배의 판정을 그 부두 게이트에 넣는 조건 — 최신 판정이 '하역중'이고:
+
+def active_cargo_judgments(
+    judgments: list[dict], presence: dict[str, tuple[str | None, str | None]], now: datetime,
+) -> dict[str, list[dict]]:
+    """부두별로, 지금 그 부두에서 하역 중인 배의 최신 판정. 게이트와 에이전트 팀 도구(same_wharf_status)가 같이 쓴다.
+
+    judgments 는 배별 **최신** 판정(단계 무관), presence 는 호출부호 → (AIS 구역, 접안 부두). 넣는 조건 — 최신 판정이
+    '하역중'이고:
       · AIS 상 그 부두에 접안 중이면 → 판정 시각과 상관없이 넣는다(②: 변화 없는 부적합이 계속 잠근다)
       · AIS 상 다른 곳에 있거나 움직이는 중이면 → 뺀다(떠났다는 증거)
       · AIS 기록이 없으면 → 6시간 이내 판정만 넣는다(모르는 경우는 옛 동작 그대로)
@@ -110,7 +123,14 @@ def gate_sources(
         elif seen != ("BERTH", j["wharf_name"]):
             continue
         by_wharf.setdefault(j["wharf_name"], []).append(j)
+    return by_wharf
 
+
+def gate_sources(
+    judgments: list[dict], presence: dict[str, tuple[str | None, str | None]], now: datetime,
+) -> list[dict]:
+    """부두별 게이트 근거 — active_cargo_judgments 를 부두 하나의 대표 판정으로 줄인다."""
+    by_wharf = active_cargo_judgments(judgments, presence, now)
     out = []
     for wharf, rows in sorted(by_wharf.items()):
         # 대표 = 막는 판정 중 가장 최근, 없으면 가장 최근 판정.
@@ -148,13 +168,7 @@ async def build_gate_snapshot(db: AsyncSession, *, manual_overrides: dict | None
             "ts_utc": now.isoformat(),
         }
 
-    judgments = [dict(r) for r in (await db.execute(_QUERY_LATEST_JUDGMENTS)).mappings().all()]
-    presence: dict[str, tuple[str | None, str | None]] = {}
-    if (await db.execute(_QUERY_PRESENCE_EXISTS)).scalar():
-        for r in (await db.execute(_QUERY_PRESENCE)).mappings().all():
-            # 같은 호출부호가 여러 위치 행으로 잡히면 접안(BERTH) 행을 우선한다 — 접안 사실을 놓치지 않게.
-            if r["call_sign"] not in presence or r["presence_zone"] == "BERTH":
-                presence[r["call_sign"]] = (r["presence_zone"], r["berth_name"])
+    judgments, presence = await load_gate_inputs(db)
     rows = gate_sources(judgments, presence, now)
 
     gates = []

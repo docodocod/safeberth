@@ -5,8 +5,8 @@
 체류 구간 같은 판정 맥락은 요청(request)이 쥐고 있어 모델이 바꿀 수 없다.
 
 발견을 만드는 도구:
-  same_wharf_status            현재 — 같은 부두에서 하역 중인 **다른** 선박의 최신 판정이 부적합(게이트 규칙과 같은 조회 —
-                               회의 §8, services/gate_state.py). 판정불가는 데이터 공백인 경우가 많아 발견이 아니라 메모로만
+  same_wharf_status            현재 — 같은 부두에서 지금 하역 중인 **다른** 선박의 최신 판정이 부적합(게이트와 같은 판단 함수
+                               gate_state.active_cargo_judgments — 회의 §8). 판정불가는 데이터 공백인 경우가 많아 발견이 아니라 메모로만
                                알린다(2026-10-12 실측). 자기 판정은 뺀다(순환 방지).
   upcoming_neighbor_conflicts  예정 — 체류 구간 안에 이 부두·인접 부두로 입항 예정인 선박(PORT-MIS)의 화물과
                                혼재 규칙(assess_verdict)이 '안전'이 아님. 예정값이라 조건의 근거만 된다(결정 7-1,
@@ -29,31 +29,15 @@ from app.agents import tools as judgment_tools
 from app.agents.orchestrator.schemas import OrchestratorRequest
 from app.agents.safety.schemas import AdjacentCargo, CargoRef, RiskLevel, SafetyAssessmentRequest, risk_level_rank
 from app.agents.safety.service import assess_verdict
-from app.models.assessment_history import GATE_BLOCKING_LEVELS, AssessmentLevel, AssessmentStage
+from app.models.assessment_history import GATE_BLOCKING_LEVELS, AssessmentLevel
+from app.services.gate_state import active_cargo_judgments, load_gate_inputs
 
 from .findings import Finding
 
 # 도구 결과를 모델에게 돌려줄 때의 길이 상한(글자). 부두에 붙은 배가 많으면 프롬프트가 불어난다.
 _MAX_RESULT_CHARS = 1500
 _MAX_WIND_HOURS = 24
-
-# 게이트 규칙과 같은 조건(gate_state._QUERY_GATE_SOURCE) — 하역중 단계, 6시간 이내 최신 판정.
-_SQL_SAME_WHARF_BLOCKED = text("""
-    WITH latest AS (
-        SELECT DISTINCT ON (call_sign) call_sign, vessel_name, wharf_name, level, reasons, assessed_at_utc
-        FROM assessment_history
-        WHERE stage = :during_cargo
-          AND assessed_at_utc > CAST(:now AS timestamptz) - interval '6 hours'
-          AND assessed_at_utc <= CAST(:now AS timestamptz)
-        ORDER BY call_sign, assessed_at_utc DESC
-    )
-    SELECT call_sign, vessel_name, level, reasons[1] AS reason, assessed_at_utc
-    FROM latest
-    WHERE wharf_name = :wharf
-      AND level = ANY(CAST(:blocking AS text[]))
-      AND upper(btrim(call_sign)) <> upper(btrim(coalesce(CAST(:exclude AS text), '')))
-    ORDER BY assessed_at_utc DESC
-""")
+_GATE_BLOCKING = tuple(lv.value for lv in GATE_BLOCKING_LEVELS)
 
 _SQL_UPCOMING_ARRIVALS = text("""
     SELECT a.callsgn, a.assigned_wharf_name AS wharf_name, a.arrival_at_utc, a.departure_at_utc,
@@ -80,12 +64,29 @@ _SQL_WIND_SERIES = text("""
 """)
 
 
+def _blocked_at(
+    judgments: list[dict], presence: dict, now: datetime, *, wharf: str, exclude_call_sign: str | None,
+) -> list[dict]:
+    """이 부두에서 지금 하역 중인 **다른** 배 중 게이트를 잠그는 판정(부적합·판정불가). 최근 판정부터.
+
+    [2026-10-12] 게이트와 같은 기준(gate_state.active_cargo_judgments)을 쓴다 — 예전엔 옛 게이트 쿼리를 본떠, 떠난 배·
+    더 최신 판정에 밀린 옛 '하역중' 판정까지 발견으로 만들었다(실측: D7AT 상향의 근거가 그 옛 판정이었다).
+    """
+    me = (exclude_call_sign or "").strip().upper()
+    rows = [
+        j for j in active_cargo_judgments(judgments, presence, now).get(wharf, [])
+        if j["level"] in _GATE_BLOCKING and (j["call_sign"] or "").strip().upper() != me
+    ]
+    return [
+        {"call_sign": j["call_sign"], "vessel_name": j["vessel_name"], "level": j["level"],
+         "reason": (j["reasons"] or [None])[0], "assessed_at_utc": j["assessed_at_utc"]}
+        for j in sorted(rows, key=lambda r: r["assessed_at_utc"], reverse=True)
+    ]
+
+
 async def _fetch_same_wharf_blocked(db: AsyncSession, *, wharf: str, exclude_call_sign: str | None, now: datetime) -> list[dict]:
-    rows = (await db.execute(_SQL_SAME_WHARF_BLOCKED, {
-        "during_cargo": AssessmentStage.DURING_CARGO.value, "now": now, "wharf": wharf,
-        "blocking": [lv.value for lv in GATE_BLOCKING_LEVELS], "exclude": exclude_call_sign,
-    })).mappings().all()
-    return [dict(r) for r in rows]
+    judgments, presence = await load_gate_inputs(db)
+    return _blocked_at(judgments, presence, now, wharf=wharf, exclude_call_sign=exclude_call_sign)
 
 
 async def _fetch_upcoming_arrivals(

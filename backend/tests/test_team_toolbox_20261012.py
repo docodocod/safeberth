@@ -261,3 +261,23 @@ async def test_unknown_judgment_on_the_same_wharf_is_a_note_not_a_finding(monkey
     out = json.loads(await _tool(box, "선석", "same_wharf_status").ainvoke({}))
     assert [f.call_sign for f in box.findings.values()] == ["BAD"]
     assert any("GAP" in n and "판정불가" in n for n in out["notes"])
+
+
+def _judgment(call_sign, level, *, stage="하역중", hours_ago=1.0, wharf="효성부두"):
+    return {"call_sign": call_sign, "vessel_name": call_sign, "wharf_name": wharf, "level": level, "stage": stage,
+            "reasons": [f"{call_sign} 사유"], "assessed_at_utc": NOW - timedelta(hours=hours_ago)}
+
+
+def test_same_wharf_uses_the_gate_rule_for_who_is_still_there():
+    # 2026-10-12 게이트 수정과 같은 기준 — 떠난 배·옛 판정은 빼고, 접안 중인 배의 오래된 '부적합'은 넣는다. 자기 자신은 뺀다.
+    judgments = [
+        _judgment("LEFT", "부적합"),                               # AIS 상 항해 중 → 떠났다
+        _judgment("SUPERSEDED", "적합", stage="접안직전"),          # 최신이 하역중이 아님
+        _judgment("STAYING", "부적합", hours_ago=9),               # 9시간째 같은 부적합, 여전히 접안
+        _judgment("TEST", "부적합"),                               # 판정 대상 자신
+    ]
+    presence = {"LEFT": ("UNDERWAY", "효성부두"), "SUPERSEDED": ("BERTH", "효성부두"),
+                "STAYING": ("BERTH", "효성부두"), "TEST": ("BERTH", "효성부두")}
+    rows = tb._blocked_at(judgments, presence, NOW, wharf="효성부두", exclude_call_sign=" test ")
+    assert [r["call_sign"] for r in rows] == ["STAYING"]
+    assert rows[0]["reason"] == "STAYING 사유" and rows[0]["level"] == "부적합"
